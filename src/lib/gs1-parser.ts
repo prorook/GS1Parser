@@ -126,6 +126,29 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
   // For "likely" barcodes (]C0, ]d1, ]Q1), gs1encoder won't accept the AIM prefix.
   // Go directly to the retry logic without attempting the doomed scanData call.
   if (gs1Confidence === "likely") {
+    // GS1 Digital Link: a URL in a ]Q1 QR code is actually compliant — gs1encoder
+    // handles ]Q1 + URL natively (but NOT ]Q3 + URL).
+    const isDigitalLink = /^https?:\/\//i.test(normalizedText);
+    if (isDigitalLink) {
+      const dlResult = tryParseDigitalLink(gs, scan.symbologyIdentifier, normalizedText);
+      if (dlResult) {
+        return {
+          gs1Confidence: "confirmed",
+          isCompliant: true,
+          symbology: "GS1 Digital Link (QR Code)",
+          symbologyIdentifier: scan.symbologyIdentifier,
+          contentType: scan.contentType,
+          barcodeFormat: scan.format,
+          rawData: scan.text,
+          originalInput,
+          elements: dlResult.elements,
+          errors: dlResult.errors,
+          warnings: dlResult.warnings,
+          hasGroupSeparators,
+        };
+      }
+    }
+
     const retryResult = tryParseAsGS1(gs, scan.symbologyIdentifier, normalizedText);
     if (retryResult) {
       return {
@@ -295,11 +318,16 @@ export async function parseGS1Manual(input: string): Promise<ParseResult> {
   // Detect if input starts with AIM symbology identifier: "]X#..."
   const hasAIMPrefix = /^\][A-Za-z]\d/.test(input);
 
+  // Detect GS1 Digital Link URI
+  const isDigitalLink = /^https?:\/\//i.test(input);
+
   try {
     if (isBracketed) {
       gs.aiDataStr = input;
     } else if (hasAIMPrefix) {
       gs.scanData = input;
+    } else if (isDigitalLink) {
+      gs.scanData = "]Q1" + input;
     } else {
       // Try as raw scan data with ]C1 prefix (assume GS1-128 for plain data)
       // If it starts with FNC1 marker "^", use dataStr
@@ -319,14 +347,14 @@ export async function parseGS1Manual(input: string): Promise<ParseResult> {
 
     const hri = gs.hri;
     const symId = gs.sym;
-    const symbologyName = SYMBOLOGY_NAMES[symId] ?? "GS1 Barcode";
+    const symbologyName = isDigitalLink ? "GS1 Digital Link" : (SYMBOLOGY_NAMES[symId] ?? "GS1 Barcode");
     const elements = parseHRIElements(hri);
 
-    const gs1Confidence: GS1Confidence = hasAIMPrefix ? "confirmed" : "likely";
+    const gs1Confidence: GS1Confidence = (hasAIMPrefix || isDigitalLink) ? "confirmed" : "likely";
     const aimPrefix = hasAIMPrefix ? input.substring(0, 3) : "";
     const warnings: ValidationMessage[] = [];
 
-    if (!hasAIMPrefix) {
+    if (!hasAIMPrefix && !isDigitalLink) {
       warnings.push({
         severity: "warning",
         message: "Manual input — GS1 compliance cannot be fully confirmed without scanning the actual barcode.",
@@ -338,7 +366,7 @@ export async function parseGS1Manual(input: string): Promise<ParseResult> {
       isCompliant: elements.length > 0 && gs1Confidence === "confirmed",
       symbology: symbologyName,
       symbologyIdentifier: aimPrefix,
-      contentType: hasAIMPrefix ? "GS1" : "Manual",
+      contentType: isDigitalLink ? "GS1 Digital Link" : hasAIMPrefix ? "GS1" : "Manual",
       barcodeFormat: "Manual Input",
       rawData: input,
       originalInput,
@@ -380,6 +408,25 @@ const GS1_AIM_EQUIVALENTS: Record<string, string> = {
   "]d1": "]d2", // DataMatrix → GS1 DataMatrix
   "]Q1": "]Q3", // QR Code → GS1 QR Code
 };
+
+/**
+ * Try to parse a GS1 Digital Link URI. gs1encoder accepts ]Q1 + URL directly.
+ * Digital Links in ]Q1 QR codes are compliant — they don't need FNC1/]Q3.
+ */
+function tryParseDigitalLink(
+  gs: GS1encoder,
+  symbologyIdentifier: string,
+  text: string
+): { elements: ParsedElement[]; errors: ValidationMessage[]; warnings: ValidationMessage[] } | null {
+  try {
+    gs.scanData = symbologyIdentifier + text;
+    const elements = parseHRIElements(gs.hri);
+    if (elements.length === 0) return null;
+    return { elements, errors: [], warnings: [] };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Try to parse scan data as GS1 by substituting the AIM prefix with GS1 equivalent.
