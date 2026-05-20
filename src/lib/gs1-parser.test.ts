@@ -161,4 +161,38 @@ describe("GS1 Parser (gs1encoder)", () => {
       expect(result.warnings[0]?.message).toContain("FNC1");
     });
   });
+
+  describe("ITF-14 barcodes", () => {
+    it("parses ITF-14 scan with ]I1 prefix as GTIN-14", async () => {
+      const scan = makeScanResult({
+        scanData: "]I100614141123452",
+        symbologyIdentifier: "]I1",
+        text: "00614141123452",
+        contentType: "Text",
+        format: "ITF",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(true);
+      expect(result.symbology).toBe("ITF-14");
+      expect(result.elements.length).toBe(1);
+      expect(result.elements[0]?.ai).toBe("01");
+      expect(result.elements[0]?.displayValue).toBe("00614141123452");
+    });
+
+    it("reports invalid check digit for ITF-14", async () => {
+      const scan = makeScanResult({
+        scanData: "]I100614141123459",
+        symbologyIdentifier: "]I1",
+        text: "00614141123459",
+        contentType: "Text",
+        format: "ITF",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0]?.message).toContain("check digit");
+    });
+  });
 });

@@ -168,6 +168,12 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
     };
   }
 
+  // ITF-14 fallback: gs1encoder may not accept ]I1 prefix, so handle manually
+  if (scan.symbologyIdentifier === "]I1") {
+    const itfResult = parseITF14(normalizedText, scan, originalInput, hasGroupSeparators);
+    if (itfResult) return itfResult;
+  }
+
   // Try to parse with gs1encoder (for "confirmed" barcodes)
   try {
     gs.scanData = normalizedScanData;
@@ -399,6 +405,51 @@ function tryParseAsGS1(
 }
 
 /**
+ * Parse ITF-14 barcode data. ITF-14 can only carry a single GTIN-14.
+ * Returns a ParseResult or null if the data doesn't look like a valid GTIN-14.
+ */
+function parseITF14(
+  text: string,
+  scan: ScanResult,
+  originalInput: string,
+  hasGroupSeparators: boolean
+): ParseResult | null {
+  // ITF-14 must be exactly 14 numeric digits
+  if (!/^\d{14}$/.test(text)) return null;
+
+  const errors: ValidationMessage[] = [];
+  const isValidCheck = validateCheckDigit(text);
+  if (!isValidCheck) {
+    errors.push({ severity: "error", message: "GTIN-14 check digit is invalid." });
+  }
+
+  const elements: ParsedElement[] = [{
+    ai: "01",
+    label: "GTIN",
+    description: "Global Trade Item Number",
+    rawValue: text,
+    displayValue: text,
+    errors: isValidCheck ? [] : [{ severity: "error", message: "Invalid check digit" }],
+    definition: null,
+  }];
+
+  return {
+    gs1Confidence: "confirmed",
+    isCompliant: isValidCheck,
+    symbology: "ITF-14",
+    symbologyIdentifier: scan.symbologyIdentifier,
+    contentType: scan.contentType,
+    barcodeFormat: scan.format,
+    rawData: text,
+    originalInput,
+    elements,
+    errors,
+    warnings: [],
+    hasGroupSeparators,
+  };
+}
+
+/**
  * Parse HRI strings from gs1encoder into ParsedElement objects.
  * With includeDataTitlesInHRI=true, format is: "LABEL (AI) value"
  * Without titles, format is: "(AI) value"
@@ -459,6 +510,11 @@ function determineConfidence(contentType: string, symbologyIdentifier: string): 
     return "confirmed";
   }
 
+  // ITF-14: ]I1 is exclusively a GTIN-14 carrier — always GS1
+  if (symbologyIdentifier === "]I1") {
+    return "confirmed";
+  }
+
   // Non-GS1 AIM codes for symbologies that COULD carry GS1 data (missing FNC1)
   const potentialGS1 = ["]C0", "]d1", "]Q1"];
   if (potentialGS1.includes(symbologyIdentifier)) {
@@ -480,6 +536,7 @@ function mapSymbologyFromAIM(symbologyIdentifier: string, format: string): strin
     "]e1": "GS1 DataBar",
     "]e2": "GS1 DataBar",
     "]e3": "GS1 DataBar",
+    "]I1": "ITF-14",
   };
 
   if (aimMap[symbologyIdentifier]) {
