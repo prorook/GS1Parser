@@ -72,9 +72,9 @@ describe("GS1 Parser (gs1encoder)", () => {
         format: "Code128",
       });
       const result = await parseGS1ScanData(scan);
-      // ]C0 is classified as "likely" (could have GS1 data without FNC1)
-      // but parsing fails since this isn't GS1 structured data
-      expect(result.gs1Confidence).toBe("likely");
+      // ]C0 initially classified as "likely" but downgraded to "unlikely"
+      // when data doesn't match any GS1 AI structure
+      expect(result.gs1Confidence).toBe("unlikely");
       expect(result.isCompliant).toBe(false);
       expect(result.errors.length).toBeGreaterThan(0);
     });

@@ -146,11 +146,10 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
         hasGroupSeparators,
       };
     }
-    // Retry failed — data doesn't match GS1 AI structure
-    // Include character analysis for debugging
-    const charInfo = [...scan.text.slice(0, 40)].map(c => c.charCodeAt(0) < 32 ? `[0x${c.charCodeAt(0).toString(16)}]` : c).join("");
+    // Retry failed — data doesn't match GS1 AI structure.
+    // Downgrade confidence: the ]d1/]C0/]Q1 heuristic was wrong, this isn't GS1 data.
     return {
-      gs1Confidence,
+      gs1Confidence: "unlikely",
       isCompliant: false,
       symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
       symbologyIdentifier: scan.symbologyIdentifier,
@@ -160,8 +159,8 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
       originalInput,
       elements: [],
       errors: [{
-        severity: "error",
-        message: `Could not parse GS1 AI data. Decoded content: ${charInfo}`,
+        severity: "info",
+        message: "This does not appear to be a GS1 barcode. No GS1 Application Identifier structure detected in the data.",
       }],
       warnings: [],
       hasGroupSeparators,
