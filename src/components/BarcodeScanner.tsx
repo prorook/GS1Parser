@@ -159,7 +159,7 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     <div className="flex flex-col items-center gap-4 w-full">
       <video
         ref={videoRef}
-        className={`w-full rounded-lg bg-gray-800 ${isScanning ? "" : "hidden"}`}
+        className={`w-full max-h-[70dvh] object-cover rounded-lg bg-gray-800 ${isScanning ? "" : "hidden"}`}
         playsInline
         muted
       />

@@ -141,13 +141,38 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
         errors: retryResult.errors,
         warnings: [{
           severity: "warning",
-          message: "This barcode contains GS1 AI data but is missing the FNC1 prefix character. It is NOT a compliant GS1 barcode. The supplier should encode FNC1 in symbology position 1.",
+          message: getMissingFNC1Warning(scan.symbologyIdentifier),
         }, ...retryResult.warnings],
         hasGroupSeparators,
       };
     }
-    // Retry failed — data doesn't match GS1 AI structure.
-    // Downgrade confidence: the ]d1/]C0/]Q1 heuristic was wrong, this isn't GS1 data.
+    // Retry failed — gs1encoder couldn't parse the AI structure.
+    // If the data starts with digits, it plausibly has GS1 AI prefixes but the parser
+    // couldn't decode them (e.g. missing GS separators). Keep "likely".
+    // If it doesn't start with digits, it's clearly not GS1 — downgrade to "unlikely".
+    const looksLikeAI = /^\d{2}/.test(normalizedText);
+    if (looksLikeAI) {
+      return {
+        gs1Confidence,
+        isCompliant: false,
+        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+        symbologyIdentifier: scan.symbologyIdentifier,
+        contentType: scan.contentType,
+        barcodeFormat: scan.format,
+        rawData: scan.text,
+        originalInput,
+        elements: [],
+        errors: [{
+          severity: "error",
+          message: "Data appears to contain GS1 AI prefixes but could not be fully parsed. Check for missing GS (FNC1) field separators between variable-length AIs.",
+        }],
+        warnings: [{
+          severity: "warning",
+          message: getMissingFNC1Warning(scan.symbologyIdentifier),
+        }],
+        hasGroupSeparators,
+      };
+    }
     return {
       gs1Confidence: "unlikely",
       isCompliant: false,
@@ -521,6 +546,19 @@ function determineConfidence(contentType: string, symbologyIdentifier: string): 
   }
 
   return "unlikely";
+}
+
+function getMissingFNC1Warning(symbologyIdentifier: string): string {
+  switch (symbologyIdentifier) {
+    case "]Q1":
+      return "This QR Code contains GS1 AI data but is not encoded as a GS1 QR Code. The supplier should encode it with FNC1 in the first position (AIM ID ]Q3).";
+    case "]d1":
+      return "This DataMatrix contains GS1 AI data but is not encoded as a GS1 DataMatrix. The supplier should encode it with FNC1 in the first position (AIM ID ]d2).";
+    case "]C0":
+      return "This Code 128 barcode contains GS1 AI data but is not encoded as GS1-128. The supplier should encode it with FNC1 in the first position (AIM ID ]C1).";
+    default:
+      return "This barcode contains GS1 AI data but is missing the FNC1 prefix character. It is NOT a compliant GS1 barcode.";
+  }
 }
 
 function mapSymbologyFromAIM(symbologyIdentifier: string, format: string): string {
