@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/barcodescanner.tsx","./src/components/parseresults.tsx","./src/lib/ai-definitions.ts","./src/lib/gs1-parser.test.ts","./src/lib/gs1-parser.ts"],"version":"5.9.3"}

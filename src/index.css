@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Override html5-qrcode's inline width on the video element */
+#scanner-container video {
+  width: 100% !important;
+  max-width: 100% !important;
+  object-fit: cover;
+}
+
+#scanner-container {
+  width: 100% !important;
+}
+
+#scanner-container > div {
+  width: 100% !important;
+}
