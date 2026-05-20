@@ -21,6 +21,10 @@ interface BarcodeScannerProps {
 const READER_OPTIONS: ReaderOptions = {
   formats: ["Code128", "QRCode", "DataMatrix", "DataBar", "EAN13", "EAN8", "ITF"],
   tryHarder: true,
+  tryRotate: true,
+  tryDownscale: true,
+  downscaleThreshold: 1500,
+  minLineCount: 1,
   maxNumberOfSymbols: 1,
 };
 
@@ -69,9 +73,10 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+          focusMode: { ideal: "continuous" },
+        } as MediaTrackConstraints,
         audio: false,
       });
       streamRef.current = stream;
