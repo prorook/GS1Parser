@@ -18,7 +18,7 @@ A browser-based GS1 barcode scanner and parser. Scan barcodes with your camera o
 - React 19 + TypeScript
 - Vite
 - Tailwind CSS
-- [zxing-wasm](https://github.com/niccolopaganini/niccolopaganini) — barcode reading via WebAssembly
+- [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) — barcode reading via WebAssembly
 - [gs1encoder](https://github.com/gs1/gs1-syntax-engine) — GS1 syntax validation via WebAssembly
 
 ## Development
