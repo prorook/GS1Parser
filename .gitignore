@@ -1,2 +1,23 @@
+# Dependencies
 node_modules
+
+# Build output
 dist
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+*.local
+.env
+.env.*
+
+# Logs
+*.log
