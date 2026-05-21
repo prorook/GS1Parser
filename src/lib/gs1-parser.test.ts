@@ -263,6 +263,67 @@ describe("GS1 Parser (gs1encoder)", () => {
     });
   });
 
+  describe("GTIN indicator-digit warning", () => {
+    it("flags AI (01) GTIN starting with 0 as suspicious for logistic labels", async () => {
+      const scan = makeScanResult({
+        scanData: "]C10100614141123452",
+        symbologyIdentifier: "]C1",
+        text: "0100614141123452",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      const gtin = result.elements.find((e) => e.ai === "01");
+      expect(gtin).toBeDefined();
+      expect(gtin?.errors.some((e) => e.severity === "warning" && e.message.includes("indicator digit"))).toBe(true);
+    });
+
+    it("does not flag AI (01) GTIN with non-zero indicator", async () => {
+      // GTIN-14 with indicator digit 1, valid check digit
+      const base = "1061414112345";
+      const cd = calculateCheckDigit(base);
+      const gtin14 = base + cd;
+      const scan = makeScanResult({
+        scanData: `]C101${gtin14}`,
+        symbologyIdentifier: "]C1",
+        text: `01${gtin14}`,
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      const gtin = result.elements.find((e) => e.ai === "01");
+      expect(gtin).toBeDefined();
+      expect(gtin?.errors.some((e) => e.message.includes("indicator digit"))).toBe(false);
+    });
+
+    it("does not flag AI (02) starting with 0 (content GTIN is supposed to be the consumer GTIN)", async () => {
+      const scan = makeScanResult({
+        scanData: `]C10200614141123452\x1D37100`,
+        symbologyIdentifier: "]C1",
+        text: `0200614141123452\x1D37100`,
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      const content = result.elements.find((e) => e.ai === "02");
+      expect(content).toBeDefined();
+      expect(content?.errors.some((e) => e.message.includes("indicator digit"))).toBe(false);
+    });
+
+    it("flags ITF-14 GTIN starting with 0", async () => {
+      const scan = makeScanResult({
+        scanData: "]I100614141123452",
+        symbologyIdentifier: "]I1",
+        text: "00614141123452",
+        contentType: "Text",
+        format: "ITF",
+      });
+      const result = await parseGS1ScanData(scan);
+      const gtin = result.elements[0];
+      expect(gtin?.errors.some((e) => e.severity === "warning" && e.message.includes("indicator digit"))).toBe(true);
+    });
+  });
+
   describe("Bracketed HRI text encoded in barcode", () => {
     it("detects ]C1 barcode with parenthesized AI text as encoded data", async () => {
       const scan = makeScanResult({

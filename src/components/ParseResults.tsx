@@ -75,21 +75,23 @@ export function ParseResults({ result }: ParseResultsProps) {
                 </tr>
               </thead>
               <tbody>
-                {elements.map((el, i) => (
-                  <tr
-                    key={i}
-                    className={`border-b border-gray-700/50 ${el.errors.length > 0 ? "bg-red-900/20" : ""}`}
-                  >
-                    <td className="px-3 py-2 font-mono text-blue-300">({el.ai})</td>
-                    <td className="px-3 py-2 text-gray-300">{el.label}</td>
-                    <td className="px-3 py-2 font-mono text-white">{el.displayValue}</td>
-                    <td className="px-3 py-2">
-                      <span role="img" aria-label={el.errors.length > 0 ? "Invalid" : "Valid"}>
-                        {el.errors.length > 0 ? "❌" : "✅"}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {elements.map((el, i) => {
+                  const hasError = el.errors.some((e) => e.severity === "error");
+                  const hasWarning = el.errors.some((e) => e.severity === "warning");
+                  const rowTint = hasError ? "bg-red-900/20" : hasWarning ? "bg-yellow-900/20" : "";
+                  const icon = hasError ? "❌" : hasWarning ? "⚠️" : "✅";
+                  const iconLabel = hasError ? "Invalid" : hasWarning ? "Warning" : "Valid";
+                  return (
+                    <tr key={i} className={`border-b border-gray-700/50 ${rowTint}`}>
+                      <td className="px-3 py-2 font-mono text-blue-300">({el.ai})</td>
+                      <td className="px-3 py-2 text-gray-300">{el.label}</td>
+                      <td className="px-3 py-2 font-mono text-white">{el.displayValue}</td>
+                      <td className="px-3 py-2">
+                        <span role="img" aria-label={iconLabel}>{icon}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

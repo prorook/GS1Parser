@@ -388,13 +388,17 @@ function parseITF14(text: string, ctx: ResultContext): ParseResult {
   }
 
   const isValidCheck = validateCheckDigit(text);
+  const elementErrors: ValidationMessage[] = [
+    ...(isValidCheck ? [] : [{ severity: "error" as const, message: "Invalid check digit" }]),
+    ...validateElementSemantics("01", text),
+  ];
   const elements: ParsedElement[] = [{
     ai: "01",
     label: "GTIN",
     description: "Global Trade Item Number",
     rawValue: text,
     displayValue: text,
-    errors: isValidCheck ? [] : [{ severity: "error", message: "Invalid check digit" }],
+    errors: elementErrors,
     definition: null,
   }];
 
@@ -763,7 +767,7 @@ function parseHRIElements(hri: string[]): ParsedElement[] {
         description: label,
         rawValue: value,
         displayValue: value,
-        errors: [],
+        errors: validateElementSemantics(ai, value),
         definition: null,
       });
       continue;
@@ -780,7 +784,7 @@ function parseHRIElements(hri: string[]): ParsedElement[] {
         description: `AI (${ai})`,
         rawValue: value,
         displayValue: value,
-        errors: [],
+        errors: validateElementSemantics(ai, value),
         definition: null,
       });
       continue;
@@ -795,6 +799,34 @@ function parseHRIElements(hri: string[]): ParsedElement[] {
   }
 
   return elements;
+}
+
+// Per-element advisory checks beyond what gs1encoder already validates.
+// These warn about data that's syntactically valid GS1 but commonly wrong
+// for vendor logistic labels — the audit context this app is built for.
+export function validateElementSemantics(ai: string, value: string): ValidationMessage[] {
+  const out: ValidationMessage[] = [];
+
+  // GTIN-14 indicator digit:
+  //   0     = base unit / consumer trade item
+  //   1..8  = packaging level (case, pallet, ...)
+  //   9     = variable-measure trade item
+  //
+  // On a vendor shipping/logistics label, AI (01) is the GTIN of the unit
+  // *being shipped*. Indicator 0 there means the vendor encoded the inner
+  // consumer GTIN — receiving systems will then treat the case as a single
+  // retail item, breaking pack-level inventory.
+  //
+  // AI (02) is the GTIN of items *inside* a logistic unit (paired with
+  // AI 37 for the count), so indicator 0 is expected there; skip.
+  if (ai === "01" && value.length === 14 && value.startsWith("0")) {
+    out.push({
+      severity: "warning",
+      message: "GTIN indicator digit is 0 (consumer/base unit). On a vendor logistic label this usually means the inner consumer GTIN was encoded instead of a packaging-level GTIN (indicator 1–8) or variable-measure GTIN (indicator 9).",
+    });
+  }
+
+  return out;
 }
 
 function determineConfidence(contentType: string, symbologyIdentifier: string): GS1Confidence {
