@@ -180,6 +180,21 @@ describe("GS1 Parser (gs1encoder)", () => {
       expect(result.elements[0]?.displayValue).toBe("00614141123452");
     });
 
+    it("reports a clear error for malformed ITF-14 data (wrong length / non-numeric)", async () => {
+      const scan = makeScanResult({
+        scanData: "]I1ABC123",
+        symbologyIdentifier: "]I1",
+        text: "ABC123",
+        contentType: "Text",
+        format: "ITF",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(false);
+      expect(result.symbology).toBe("ITF-14");
+      expect(result.errors[0]?.message).toContain("14 numeric digits");
+    });
+
     it("reports invalid check digit for ITF-14", async () => {
       const scan = makeScanResult({
         scanData: "]I100614141123459",

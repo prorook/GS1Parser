@@ -150,10 +150,11 @@ async function parseGS1ScanDataImpl(gs: GS1encoder, scan: ScanResult): Promise<P
     return handleLikely(gs, scan, normalizedText, ctx);
   }
 
-  // ITF-14 fallback: gs1encoder won't accept the ]I1 prefix, so handle manually.
+  // ITF-14: gs1encoder won't accept the ]I1 prefix, so parse it ourselves.
+  // parseITF14 always returns a result (handles malformed data with a clear
+  // error rather than falling through to a confusing gs1encoder rejection).
   if (scan.symbologyIdentifier === "]I1") {
-    const itfResult = parseITF14(normalizedText, scan, scan.scanData, hasGroupSeparators);
-    if (itfResult) return itfResult;
+    return parseITF14(normalizedText, ctx);
   }
 
   return handleConfirmed(gs, scan, normalizedScanData, normalizedText, ctx);
@@ -364,24 +365,29 @@ function tryParseAsGS1(
 }
 
 /**
- * Parse ITF-14 barcode data. ITF-14 can only carry a single GTIN-14.
- * Returns a ParseResult or null if the data doesn't look like a valid GTIN-14.
+ * Parse ITF-14 barcode data. ITF-14 can only carry a single GTIN-14, so
+ * this is short and always returns a result — handing weird ]I1 data to
+ * gs1encoder produces unhelpful errors, so we own the messaging here.
  */
-function parseITF14(
-  text: string,
-  scan: ScanResult,
-  originalInput: string,
-  hasGroupSeparators: boolean
-): ParseResult | null {
-  // ITF-14 must be exactly 14 numeric digits
-  if (!/^\d{14}$/.test(text)) return null;
-
-  const errors: ValidationMessage[] = [];
-  const isValidCheck = validateCheckDigit(text);
-  if (!isValidCheck) {
-    errors.push({ severity: "error", message: "GTIN-14 check digit is invalid." });
+function parseITF14(text: string, ctx: ResultContext): ParseResult {
+  // ITF-14 carries exactly 14 numeric digits. Real ]I1 scans from zxing
+  // always satisfy this, but be defensive — a clear error here is much
+  // better than letting it fall through to gs1encoder.
+  if (!/^\d{14}$/.test(text)) {
+    return makeResult(ctx, {
+      gs1Confidence: "confirmed",
+      isCompliant: false,
+      symbology: "ITF-14",
+      elements: [],
+      errors: [{
+        severity: "error",
+        message: `ITF-14 barcode must contain exactly 14 numeric digits (GTIN-14). Got ${text.length} character${text.length === 1 ? "" : "s"}.`,
+      }],
+      warnings: [],
+    });
   }
 
+  const isValidCheck = validateCheckDigit(text);
   const elements: ParsedElement[] = [{
     ai: "01",
     label: "GTIN",
@@ -392,20 +398,14 @@ function parseITF14(
     definition: null,
   }];
 
-  return {
+  return makeResult(ctx, {
     gs1Confidence: "confirmed",
     isCompliant: isValidCheck,
     symbology: "ITF-14",
-    symbologyIdentifier: scan.symbologyIdentifier,
-    contentType: scan.contentType,
-    barcodeFormat: scan.format,
-    rawData: text,
-    originalInput,
     elements,
-    errors,
+    errors: isValidCheck ? [] : [{ severity: "error", message: "GTIN-14 check digit is invalid." }],
     warnings: [],
-    hasGroupSeparators,
-  };
+  });
 }
 
 // ----- Result-building helpers -----
