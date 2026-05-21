@@ -34,6 +34,55 @@ const READER_OPTIONS: ReaderOptions = {
   maxNumberOfSymbols: 1,
 };
 
+// Region-of-interest geometry.
+//
+// Two ROI computations from the same percentages:
+//
+// - `computeScanRoi` runs in the scan loop on (sourceW, sourceH) and uses
+//   min(sourceW, sourceH) as its base. Source dimensions don't change with
+//   phone orientation (the camera sensor is fixed), so the scanned region
+//   is a stable fraction of the source frame.
+//
+// - `computeOverlayRoi` runs in the aim overlay on (containerW, containerH)
+//   but uses viewport `vmin` (phone's physical narrow side) as its base.
+//   vmin is the same in portrait and landscape, so the visible band stays
+//   the same absolute size when you rotate the phone — using min of the
+//   container would change because the container itself reshapes.
+//
+// 1D mode: horizontal strip = base × pct tall, full container width.
+// 2D mode: centered square = base × pct on a side.
+const ROI_1D_BASE_PCT = 0.40;
+const ROI_2D_BASE_PCT = 0.65;
+
+type RoiMode = "1d" | "2d";
+type RoiRect = { x: number; y: number; w: number; h: number };
+
+function roiFromBase(mode: RoiMode, w: number, h: number, base: number): RoiRect {
+  if (mode === "1d") {
+    const bh = Math.min(h, Math.floor(base * ROI_1D_BASE_PCT));
+    return { x: 0, y: Math.floor((h - bh) / 2), w, h: bh };
+  }
+  const side = Math.min(w, h, Math.floor(base * ROI_2D_BASE_PCT));
+  return {
+    x: Math.floor((w - side) / 2),
+    y: Math.floor((h - side) / 2),
+    w: side,
+    h: side,
+  };
+}
+
+function computeScanRoi(mode: RoiMode, sourceW: number, sourceH: number): RoiRect {
+  return roiFromBase(mode, sourceW, sourceH, Math.min(sourceW, sourceH));
+}
+
+function computeOverlayRoi(mode: RoiMode, containerW: number, containerH: number): RoiRect {
+  // Fall back to the smaller container dim if vmin is unavailable (SSR / tests).
+  const vmin = typeof window === "undefined"
+    ? Math.min(containerW, containerH)
+    : Math.min(window.innerWidth, window.innerHeight);
+  return roiFromBase(mode, containerW, containerH, vmin);
+}
+
 export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,12 +90,16 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const [scanLog, setScanLog] = useState<string[]>([]);
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
+  const [roiMode, setRoiMode] = useState<RoiMode>("1d");
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
   const rafRef = useRef<number>(0);
   const stoppedRef = useRef(false);
+  // Mirror roiMode into a ref so the scan loop reads the current value each
+  // tick without having to be torn down and recreated on toggle.
+  const roiModeRef = useRef<RoiMode>("1d");
 
   const stopScanning = useCallback(() => {
     stoppedRef.current = true;
@@ -62,6 +115,14 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     setIsScanning(false);
     setTorchSupported(false);
     setTorchOn(false);
+  }, []);
+
+  const toggleRoiMode = useCallback(() => {
+    setRoiMode((prev) => {
+      const next: RoiMode = prev === "1d" ? "2d" : "1d";
+      roiModeRef.current = next;
+      return next;
+    });
   }, []);
 
   const toggleTorch = useCallback(async () => {
@@ -136,13 +197,21 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
           return;
         }
 
-        // Grab frame as ImageData
+        // Grab only the ROI rectangle as ImageData. Painting just the slice
+        // (rather than the whole frame and then sampling) keeps both the
+        // canvas size and the JS→WASM transfer small. ROI mode is read
+        // from a ref each tick so toggling 1D ↔ 2D takes effect immediately.
         const { videoWidth, videoHeight } = videoEl;
         if (videoWidth > 0 && videoHeight > 0) {
-          canvasEl.width = videoWidth;
-          canvasEl.height = videoHeight;
-          ctx.drawImage(videoEl, 0, 0);
-          const imageData = ctx.getImageData(0, 0, videoWidth, videoHeight);
+          const roi = computeScanRoi(roiModeRef.current, videoWidth, videoHeight);
+          canvasEl.width = roi.w;
+          canvasEl.height = roi.h;
+          ctx.drawImage(
+            videoEl,
+            roi.x, roi.y, roi.w, roi.h, // source rect (ROI slice of frame)
+            0,     0,     roi.w, roi.h, // dest rect (whole canvas)
+          );
+          const imageData = ctx.getImageData(0, 0, roi.w, roi.h);
 
           try {
             const results: ReadResult[] = await readBarcodes(imageData, READER_OPTIONS);
@@ -208,12 +277,15 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
 
   return (
     <div className="flex flex-col items-center gap-4 w-full">
-      <video
-        ref={videoRef}
-        className={`w-full max-h-[70dvh] object-cover rounded-lg bg-gray-800 ${isScanning ? "" : "hidden"}`}
-        playsInline
-        muted
-      />
+      <div className="relative w-full overflow-hidden rounded-lg">
+        <video
+          ref={videoRef}
+          className={`w-full max-h-[70dvh] object-cover bg-gray-800 ${isScanning ? "" : "hidden"}`}
+          playsInline
+          muted
+        />
+        {isScanning && <RoiOverlay mode={roiMode} />}
+      </div>
       <canvas ref={canvasRef} className="hidden" />
 
       {error && (
@@ -256,6 +328,13 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
                 <span aria-hidden="true">🔦 </span>{torchOn ? "On" : "Off"}
               </button>
             )}
+            <button
+              onClick={toggleRoiMode}
+              aria-label={`Scan mode: ${roiMode === "1d" ? "1D barcode (horizontal strip)" : "2D barcode (rectangle)"}. Tap to switch to ${roiMode === "1d" ? "2D" : "1D"}.`}
+              className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
+            >
+              {roiMode === "1d" ? "1D" : "2D"}
+            </button>
           </>
         )}
       </div>
@@ -278,6 +357,70 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
             ))}
           </div>
         </details>
+      )}
+    </div>
+  );
+}
+
+// Aim overlay positioned over the video element. Measures the displayed
+// container so the 2D square sizes off the smaller dimension (which pure
+// CSS can't constrain cleanly), and so 1D height looks the same in
+// portrait and landscape. Uses the same `computeRoi` as the scan loop so
+// the visible band lines up with what readBarcodes actually sees.
+//
+// The container has `overflow-hidden`, so the huge box-shadow safely
+// dims everything outside the aim rect.
+function RoiOverlay({ mode }: { mode: RoiMode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState<RoiRect | null>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w > 0 && h > 0) setBox(computeOverlayRoi(mode, w, h));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    // Orientation change resizes the viewport (so vmin changes), but the
+    // overlay container's size may not — listen explicitly so we recompute.
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, [mode]);
+
+  return (
+    <div ref={ref} className="absolute inset-0 pointer-events-none">
+      {box && (
+        <>
+          <div
+            className="absolute border-2 border-blue-400/80 rounded-sm"
+            style={{
+              left: box.x,
+              top: box.y,
+              width: box.w,
+              height: box.h,
+              boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.5)",
+            }}
+          />
+          {mode === "1d" && (
+            <div
+              className="absolute border-t border-red-500/80"
+              style={{
+                left: box.x,
+                top: box.y + Math.floor(box.h / 2),
+                width: box.w,
+              }}
+            />
+          )}
+        </>
       )}
     </div>
   );
