@@ -74,6 +74,15 @@ function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+// True only in dev mode AND when the URL has ?debug=1. Use this for logs
+// that fire on every non-GS1 scan (and would otherwise spam the console);
+// for "this should never happen" warnings, use `import.meta.env.DEV` alone.
+function isDebugEnabled(): boolean {
+  if (!import.meta.env.DEV) return false;
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("debug");
+}
+
 // Common characters scanners use as FNC1/GS (ASCII 29) substitutes
 const GS_SUBSTITUTES = [
   { char: "%", name: "percent sign (%)" },
@@ -343,7 +352,7 @@ function tryParseAsGS1(
 
     return { elements, errors, warnings };
   } catch (innerErr) {
-    if (import.meta.env.DEV) {
+    if (isDebugEnabled()) {
       console.error("[tryParseAsGS1] failed:", innerErr, "| input:", JSON.stringify(gs1Prefix + text), "| charCodes:", [...text.slice(0, 30)].map(c => c.charCodeAt(0)));
     }
     // Return null — data doesn't match any GS1 AI structure
