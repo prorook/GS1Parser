@@ -774,6 +774,14 @@ function parseHRIElements(hri: string[]): ParsedElement[] {
         errors: [],
         definition: null,
       });
+      continue;
+    }
+
+    // Neither shape matched. This shouldn't happen with the current
+    // gs1encoder output format, so surface it in dev — it would mean either
+    // gs1encoder changed its HRI format or we hit an edge case worth seeing.
+    if (import.meta.env.DEV) {
+      console.warn("[parseHRIElements] unrecognized HRI line:", JSON.stringify(line));
     }
   }
 
