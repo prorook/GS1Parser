@@ -62,6 +62,18 @@ function getEncoder(): Promise<GS1encoder> {
   return encoderPromise;
 }
 
+// The gs1encoder instance is a stateful singleton — setters like `scanData` and
+// `validateAIassociations` mutate it. Serialize all parses through a promise
+// chain so concurrent callers can't observe or corrupt each other's state.
+let parseQueue: Promise<unknown> = Promise.resolve();
+function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+  const next = parseQueue.then(fn, fn);
+  // Don't let a rejection break the chain for subsequent callers, but still
+  // propagate the original error to this caller.
+  parseQueue = next.catch(() => undefined);
+  return next;
+}
+
 // Common characters scanners use as FNC1/GS (ASCII 29) substitutes
 const GS_SUBSTITUTES = [
   { char: "%", name: "percent sign (%)" },
@@ -99,6 +111,10 @@ initSymbologyNames();
  */
 export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
   const gs = await getEncoder();
+  return runExclusive(() => parseGS1ScanDataImpl(gs, scan));
+}
+
+async function parseGS1ScanDataImpl(gs: GS1encoder, scan: ScanResult): Promise<ParseResult> {
   const originalInput = scan.scanData;
 
   // zxing-wasm may encode GS (ASCII 29) as literal "<GS>" text — normalize to \x1D
@@ -343,25 +359,30 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
     // For confirmed GS1 barcodes, try to still extract elements with relaxed validation.
     // The validation error becomes a warning — the barcode IS valid GS1, just has association issues.
     if (gs1Confidence === "confirmed") {
+      let relaxedElements: ParsedElement[] | null = null;
+      let relaxedSymbology = "";
       try {
         gs.validateAIassociations = false;
         gs.scanData = normalizedScanData;
-        const hri = gs.hri;
-        const symId = gs.sym;
-        const symbologyName = SYMBOLOGY_NAMES[symId] ?? `GS1 Barcode (sym=${symId})`;
-        const elements = parseHRIElements(hri);
-        gs.validateAIassociations = true;
+        relaxedElements = parseHRIElements(gs.hri);
+        relaxedSymbology = SYMBOLOGY_NAMES[gs.sym] ?? `GS1 Barcode (sym=${gs.sym})`;
+      } catch {
+        // Relaxed parse also failed — fall through to substitute/bracketed checks.
+      } finally {
+        try { gs.validateAIassociations = true; } catch { /* ignore */ }
+      }
 
+      if (relaxedElements !== null) {
         return {
           gs1Confidence,
           isCompliant: true, // It IS a valid GS1 barcode — associations are advisory
-          symbology: symbologyName,
+          symbology: relaxedSymbology,
           symbologyIdentifier: scan.symbologyIdentifier,
           contentType: scan.contentType,
           barcodeFormat: scan.format,
           rawData: scan.text,
           originalInput,
-          elements,
+          elements: relaxedElements,
           errors: [],
           warnings: [{
             severity: "warning",
@@ -369,10 +390,9 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
           }],
           hasGroupSeparators,
         };
-      } catch {
-        // Relaxed parse also failed — try detecting wrong group separator characters
-        try { gs.validateAIassociations = true; } catch { /* ignore */ }
+      }
 
+      {
         for (const sub of GS_SUBSTITUTES) {
           if (!normalizedText.includes(sub.char)) continue;
           const fixedText = normalizedText.split(sub.char).join("\x1D");
@@ -451,6 +471,10 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
  */
 export async function parseGS1Manual(input: string): Promise<ParseResult> {
   const gs = await getEncoder();
+  return runExclusive(() => parseGS1ManualImpl(gs, input));
+}
+
+async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseResult> {
   const originalInput = input;
   const hasGroupSeparators = input.includes("\x1D");
 

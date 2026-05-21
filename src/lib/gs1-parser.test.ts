@@ -196,6 +196,58 @@ describe("GS1 Parser (gs1encoder)", () => {
     });
   });
 
+  describe("Concurrent parses (singleton mutex)", () => {
+    it("interleaved confirmed + likely parses do not corrupt each other", async () => {
+      // Run a confirmed parse, a likely parse that triggers relaxed validation,
+      // and a non-GS1 parse all at once. Without serialization, the shared
+      // gs1encoder's validateAIassociations / scanData state would race and
+      // produce wrong results or thrown errors.
+      const confirmed = makeScanResult({
+        scanData: `]C1010061414112345210ABC`,
+        symbologyIdentifier: "]C1",
+        text: `010061414112345210ABC`,
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const likely = makeScanResult({
+        scanData: `]C024124000584\x1D15270518\x1D301400\x1D10710353`,
+        symbologyIdentifier: "]C0",
+        text: `24124000584\x1D15270518\x1D301400\x1D10710353`,
+        contentType: "Text",
+        format: "Code128",
+      });
+      const notGS1 = makeScanResult({
+        scanData: "]C0HELLO WORLD",
+        symbologyIdentifier: "]C0",
+        text: "HELLO WORLD",
+        contentType: "Text",
+        format: "Code128",
+      });
+
+      // 20 interleaved parses
+      const tasks: Promise<{ kind: string; result: Awaited<ReturnType<typeof parseGS1ScanData>> }>[] = [];
+      for (let i = 0; i < 20; i++) {
+        const pick = i % 3 === 0 ? confirmed : i % 3 === 1 ? likely : notGS1;
+        const kind = i % 3 === 0 ? "confirmed" : i % 3 === 1 ? "likely" : "notGS1";
+        tasks.push(parseGS1ScanData(pick).then(result => ({ kind, result })));
+      }
+      const results = await Promise.all(tasks);
+
+      for (const { kind, result } of results) {
+        if (kind === "confirmed") {
+          expect(result.gs1Confidence).toBe("confirmed");
+          expect(result.isCompliant).toBe(true);
+          expect(result.elements[0]?.ai).toBe("01");
+        } else if (kind === "likely") {
+          expect(result.gs1Confidence).toBe("likely");
+          expect(result.elements.length).toBe(4);
+        } else {
+          expect(result.gs1Confidence).toBe("unlikely");
+        }
+      }
+    });
+  });
+
   describe("Bracketed HRI text encoded in barcode", () => {
     it("detects ]C1 barcode with parenthesized AI text as encoded data", async () => {
       const scan = makeScanResult({
