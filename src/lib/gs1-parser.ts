@@ -235,6 +235,31 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
       }
     }
 
+    // Check if the barcode literally contains human-readable bracketed AI text
+    const bracketedResult = tryParseBracketed(gs, normalizedText);
+    if (bracketedResult) {
+      return {
+        gs1Confidence: "likely",
+        isCompliant: false,
+        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+        symbologyIdentifier: scan.symbologyIdentifier,
+        contentType: scan.contentType,
+        barcodeFormat: scan.format,
+        rawData: scan.text,
+        originalInput,
+        elements: bracketedResult.elements,
+        errors: [{
+          severity: "error",
+          message: "This barcode contains the human-readable AI text (with parentheses) as its encoded data. The parentheses are NOT supposed to be in the barcode — they are only for printed human-readable text. The label software must encode the data with FNC1 separators, not parentheses.",
+        }, ...bracketedResult.errors],
+        warnings: [{
+          severity: "warning",
+          message: getMissingFNC1Warning(scan.symbologyIdentifier),
+        }],
+        hasGroupSeparators,
+      };
+    }
+
     // No substitute char detected — fall back to generic error.
     // If the data starts with digits, it plausibly has GS1 AI prefixes but the parser
     // couldn't decode them (e.g. missing GS separators). Keep "likely".
@@ -376,6 +401,28 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
             }
           } catch { /* this substitute didn't help */ }
         }
+
+        // Check if barcode literally contains bracketed HRI text
+        const bracketedResult = tryParseBracketed(gs, normalizedText);
+        if (bracketedResult) {
+          return {
+            gs1Confidence,
+            isCompliant: false,
+            symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+            symbologyIdentifier: scan.symbologyIdentifier,
+            contentType: scan.contentType,
+            barcodeFormat: scan.format,
+            rawData: scan.text,
+            originalInput,
+            elements: bracketedResult.elements,
+            errors: [{
+              severity: "error",
+              message: "This barcode contains the human-readable AI text (with parentheses) as its encoded data. The parentheses are NOT supposed to be in the barcode — they are only for printed human-readable text. The label software must encode the data with FNC1 separators, not parentheses.",
+            }, ...bracketedResult.errors],
+            warnings: [],
+            hasGroupSeparators,
+          };
+        }
       }
     }
 
@@ -493,6 +540,41 @@ export async function parseGS1Manual(input: string): Promise<ParseResult> {
       hasGroupSeparators,
     };
   }
+}
+
+/**
+ * Try to parse data that looks like human-readable bracketed AI format: (01)...(10)...
+ * This happens when the barcode literally encodes the HRI text with parentheses
+ * instead of using proper FNC1 encoding.
+ */
+function tryParseBracketed(
+  gs: GS1encoder,
+  text: string
+): { elements: ParsedElement[]; errors: ValidationMessage[]; warnings: ValidationMessage[] } | null {
+  if (!/^\(\d{2,4}\)/.test(text)) return null;
+
+  // Must have at least 2 bracketed AI patterns to be confident this is HRI text
+  const aiPattern = /\(\d{2,4}\)/g;
+  const matches = text.match(aiPattern);
+  if (!matches || matches.length < 2) return null;
+
+  // Try to parse with gs1encoder for proper element extraction
+  try {
+    gs.aiDataStr = text;
+    const elements = parseHRIElements(gs.hri);
+    if (elements.length > 0) {
+      return { elements, errors: [], warnings: [] };
+    }
+  } catch {
+    // Parsing failed (e.g. wrong field length, bad check digit) but the pattern
+    // is unmistakably bracketed HRI text. Return empty elements with a note.
+  }
+
+  // Pattern is clearly bracketed AI text even if gs1encoder can't validate it
+  return { elements: [], errors: [{
+    severity: "warning",
+    message: "Could not fully validate the AI data (possible field length or check digit error), but the bracketed format was detected.",
+  }], warnings: [] };
 }
 
 /**

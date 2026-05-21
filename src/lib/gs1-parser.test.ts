@@ -195,4 +195,22 @@ describe("GS1 Parser (gs1encoder)", () => {
       expect(result.errors[0]?.message).toContain("check digit");
     });
   });
+
+  describe("Bracketed HRI text encoded in barcode", () => {
+    it("detects ]C1 barcode with parenthesized AI text as encoded data", async () => {
+      const scan = makeScanResult({
+        scanData: "]C1(01)0001159022019(11)211117(17)220418(30)12(10)21321200212",
+        symbologyIdentifier: "]C1",
+        text: "(01)0001159022019(11)211117(17)220418(30)12(10)21321200212",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0]?.message).toContain("parentheses");
+      expect(result.errors[0]?.message).toContain("human-readable");
+    });
+  });
 });
