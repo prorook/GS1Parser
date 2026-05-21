@@ -12,7 +12,7 @@ export function ParseResults({ result }: ParseResultsProps) {
       {/* Header / Status */}
       <div className={`p-4 rounded-lg border ${getStatusStyles(isCompliant, gs1Confidence)}`}>
         <div className="flex items-center gap-2 text-lg font-semibold">
-          {getStatusIcon(isCompliant, gs1Confidence)}
+          <span aria-hidden="true">{getStatusIcon(isCompliant, gs1Confidence)}</span>
           <span>{getStatusText(isCompliant, gs1Confidence)}</span>
         </div>
         <p className="text-sm mt-1 opacity-80">Symbology: {symbology}</p>
@@ -69,7 +69,9 @@ export function ParseResults({ result }: ParseResultsProps) {
                   <th className="text-left px-3 py-2">AI</th>
                   <th className="text-left px-3 py-2">Label</th>
                   <th className="text-left px-3 py-2">Value</th>
-                  <th className="text-left px-3 py-2 w-8"></th>
+                  <th scope="col" className="text-left px-3 py-2 w-8">
+                    <span className="sr-only">Status</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -82,7 +84,9 @@ export function ParseResults({ result }: ParseResultsProps) {
                     <td className="px-3 py-2 text-gray-300">{el.label}</td>
                     <td className="px-3 py-2 font-mono text-white">{el.displayValue}</td>
                     <td className="px-3 py-2">
-                      {el.errors.length > 0 ? "❌" : "✅"}
+                      <span role="img" aria-label={el.errors.length > 0 ? "Invalid" : "Valid"}>
+                        {el.errors.length > 0 ? "❌" : "✅"}
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -140,10 +144,11 @@ function MessageCard({ severity, message }: { severity: Severity; message: strin
     info: "bg-blue-900/30 border-blue-700 text-blue-300",
   };
   const icons = { error: "❌", warning: "⚠️", info: "ℹ️" };
+  const role = severity === "error" ? "alert" : "status";
 
   return (
-    <div className={`px-3 py-2 rounded border text-sm ${styles[severity]}`}>
-      {icons[severity]} {message}
+    <div role={role} className={`px-3 py-2 rounded border text-sm ${styles[severity]}`}>
+      <span role="img" aria-label={severity}>{icons[severity]}</span> {message}
     </div>
   );
 }

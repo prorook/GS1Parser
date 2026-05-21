@@ -89,7 +89,11 @@ export default function App() {
 
             {showManual && (
               <div className="space-y-2">
+                <label htmlFor="manual-input" className="sr-only">
+                  Barcode data
+                </label>
                 <textarea
+                  id="manual-input"
                   value={manualInput}
                   onChange={(e) => setManualInput(e.target.value)}
                   placeholder="Paste barcode data here. Use <GS> for group separator characters."

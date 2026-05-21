@@ -201,16 +201,18 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
         {!isScanning ? (
           <button
             onClick={startScanning}
+            aria-label="Scan barcode"
             className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
           >
-            📷 Scan Barcode
+            <span aria-hidden="true">📷 </span>Scan Barcode
           </button>
         ) : (
           <button
             onClick={stopScanning}
+            aria-label="Stop scanning"
             className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors"
           >
-            ⏹ Stop
+            <span aria-hidden="true">⏹ </span>Stop
           </button>
         )}
       </div>
