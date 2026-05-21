@@ -500,14 +500,8 @@ async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseR
       if (input.startsWith("^")) {
         gs.dataStr = input;
       } else {
-        // Try bracketed first, fall back to scan data
-        try {
-          gs.scanData = "]C1" + input;
-        } catch {
-          // If that fails, try as-is (might be plain AI data)
-          gs.aiDataStr = "(" + extractAIGuess(input) + ")" + input;
-          throw new Error("Cannot determine data format. Use bracketed AI format, e.g. (01)09521234543213");
-        }
+        // Plain data — assume GS1-128 scan data. gs1encoder throws if it can't parse.
+        gs.scanData = "]C1" + input;
       }
     }
 
@@ -839,14 +833,6 @@ function mapSymbologyFromAIM(symbologyIdentifier: string, format: string): strin
     "ITF": "ITF",
   };
   return formatMap[format] ?? format ?? "Unknown";
-}
-
-// Attempt to guess AI prefix from raw numeric data (fallback only)
-function extractAIGuess(data: string): string {
-  if (/^00\d{18}/.test(data)) return "00";
-  if (/^01\d{14}/.test(data)) return "01";
-  if (/^02\d{14}/.test(data)) return "02";
-  return "01"; // default guess
 }
 
 // Keep legacy exports for test compatibility
