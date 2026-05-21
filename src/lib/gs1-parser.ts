@@ -115,355 +115,39 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
 }
 
 async function parseGS1ScanDataImpl(gs: GS1encoder, scan: ScanResult): Promise<ParseResult> {
-  const originalInput = scan.scanData;
-
   // zxing-wasm may encode GS (ASCII 29) as literal "<GS>" text — normalize to \x1D
   const normalizedText = scan.text.replace(/<GS>/g, "\x1D");
   const normalizedScanData = scan.symbologyIdentifier + normalizedText;
   const hasGroupSeparators = normalizedText.includes("\x1D");
+  const ctx = buildScanContext(scan, scan.scanData, hasGroupSeparators);
 
-  // Determine confidence from zxing-wasm's contentType and symbologyIdentifier
-  const gs1Confidence = determineConfidence(scan.contentType, scan.symbologyIdentifier);
+  const confidence = determineConfidence(scan.contentType, scan.symbologyIdentifier);
 
-  // If it's not GS1 content, return early without trying to parse AIs
-  if (gs1Confidence === "unlikely") {
-    return {
-      gs1Confidence,
+  if (confidence === "unlikely") {
+    return makeResult(ctx, {
+      gs1Confidence: "unlikely",
       isCompliant: false,
       symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-      symbologyIdentifier: scan.symbologyIdentifier,
-      contentType: scan.contentType,
-      barcodeFormat: scan.format,
-      rawData: scan.text,
-      originalInput,
       elements: [],
       errors: [{
         severity: "error",
         message: "This does not appear to be a GS1 barcode. No GS1 content type detected by scanner.",
       }],
       warnings: [],
-      hasGroupSeparators,
-    };
+    });
   }
 
-  // For "likely" barcodes (]C0, ]d1, ]Q1), gs1encoder won't accept the AIM prefix.
-  // Go directly to the retry logic without attempting the doomed scanData call.
-  if (gs1Confidence === "likely") {
-    // GS1 Digital Link: a URL in a ]Q1 QR code is actually compliant — gs1encoder
-    // handles ]Q1 + URL natively (but NOT ]Q3 + URL).
-    const isDigitalLink = /^https?:\/\//i.test(normalizedText);
-    if (isDigitalLink) {
-      const dlResult = tryParseDigitalLink(gs, scan.symbologyIdentifier, normalizedText);
-      if (dlResult) {
-        return {
-          gs1Confidence: "confirmed",
-          isCompliant: true,
-          symbology: "GS1 Digital Link (QR Code)",
-          symbologyIdentifier: scan.symbologyIdentifier,
-          contentType: scan.contentType,
-          barcodeFormat: scan.format,
-          rawData: scan.text,
-          originalInput,
-          elements: dlResult.elements,
-          errors: dlResult.errors,
-          warnings: dlResult.warnings,
-          hasGroupSeparators,
-        };
-      }
-    }
-
-    const retryResult = tryParseAsGS1(gs, scan.symbologyIdentifier, normalizedText);
-    if (retryResult) {
-      // Single-element parses from non-GS1 barcodes are often false positives —
-      // random data like "24000584" can accidentally match AI 240.  Only trust a
-      // single-element parse if it's an AI that commonly appears alone (SSCC, GTIN)
-      // or if GS separators were present (strong signal of real GS1 structure).
-      const isSuspicious = retryResult.elements.length === 1
-        && !hasGroupSeparators
-        && !["00", "01", "02"].includes(retryResult.elements[0]?.ai ?? "");
-
-      if (isSuspicious) {
-        return {
-          gs1Confidence: "unlikely",
-          isCompliant: false,
-          symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-          symbologyIdentifier: scan.symbologyIdentifier,
-          contentType: scan.contentType,
-          barcodeFormat: scan.format,
-          rawData: scan.text,
-          originalInput,
-          elements: [],
-          errors: [{
-            severity: "info",
-            message: "This does not appear to be a GS1 barcode. Data coincidentally matches AI structure but contains only a single element — likely a standard product or internal code.",
-          }],
-          warnings: [],
-          hasGroupSeparators,
-        };
-      }
-
-      return {
-        gs1Confidence,
-        isCompliant: false,
-        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-        symbologyIdentifier: scan.symbologyIdentifier,
-        contentType: scan.contentType,
-        barcodeFormat: scan.format,
-        rawData: scan.text,
-        originalInput,
-        elements: retryResult.elements,
-        errors: retryResult.errors,
-        warnings: [{
-          severity: "warning",
-          message: getMissingFNC1Warning(scan.symbologyIdentifier),
-        }, ...retryResult.warnings],
-        hasGroupSeparators,
-      };
-    }
-    // Retry failed — try detecting wrong group separator characters.
-    // Some scanners/systems substitute FNC1 (GS, ASCII 29) with a printable character.
-    // If replacing a candidate char with \x1D makes the data parse, that's the culprit.
-    for (const sub of GS_SUBSTITUTES) {
-      if (!normalizedText.includes(sub.char)) continue;
-      const fixedText = normalizedText.split(sub.char).join("\x1D");
-      const fixedResult = tryParseAsGS1(gs, scan.symbologyIdentifier, fixedText);
-      if (fixedResult && fixedResult.elements.length > 1) {
-        return {
-          gs1Confidence: "likely",
-          isCompliant: false,
-          symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-          symbologyIdentifier: scan.symbologyIdentifier,
-          contentType: scan.contentType,
-          barcodeFormat: scan.format,
-          rawData: scan.text,
-          originalInput,
-          elements: fixedResult.elements,
-          errors: [{
-            severity: "error",
-            message: `The ${sub.name} character is being used as a group separator instead of FNC1 (ASCII 29 / GS). The scanner or label software must be reconfigured to use the correct GS character.`,
-          }, ...fixedResult.errors],
-          warnings: [{
-            severity: "warning",
-            message: getMissingFNC1Warning(scan.symbologyIdentifier),
-          }, ...fixedResult.warnings],
-          hasGroupSeparators: true,
-        };
-      }
-    }
-
-    // Check if the barcode literally contains human-readable bracketed AI text
-    const bracketedResult = tryParseBracketed(gs, normalizedText);
-    if (bracketedResult) {
-      return {
-        gs1Confidence: "likely",
-        isCompliant: false,
-        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-        symbologyIdentifier: scan.symbologyIdentifier,
-        contentType: scan.contentType,
-        barcodeFormat: scan.format,
-        rawData: scan.text,
-        originalInput,
-        elements: bracketedResult.elements,
-        errors: [{
-          severity: "error",
-          message: "This barcode contains the human-readable AI text (with parentheses) as its encoded data. The parentheses are NOT supposed to be in the barcode — they are only for printed human-readable text. The label software must encode the data with FNC1 separators, not parentheses.",
-        }, ...bracketedResult.errors],
-        warnings: [{
-          severity: "warning",
-          message: getMissingFNC1Warning(scan.symbologyIdentifier),
-        }],
-        hasGroupSeparators,
-      };
-    }
-
-    // No substitute char detected — fall back to generic error.
-    // If the data starts with digits, it plausibly has GS1 AI prefixes but the parser
-    // couldn't decode them (e.g. missing GS separators). Keep "likely".
-    // If it doesn't start with digits, it's clearly not GS1 — downgrade to "unlikely".
-    const looksLikeAI = /^\d{2}/.test(normalizedText);
-    if (looksLikeAI) {
-      return {
-        gs1Confidence,
-        isCompliant: false,
-        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-        symbologyIdentifier: scan.symbologyIdentifier,
-        contentType: scan.contentType,
-        barcodeFormat: scan.format,
-        rawData: scan.text,
-        originalInput,
-        elements: [],
-        errors: [{
-          severity: "error",
-          message: "Data appears to contain GS1 AI prefixes but could not be fully parsed. Check for missing GS (FNC1) field separators between variable-length AIs.",
-        }],
-        warnings: [{
-          severity: "warning",
-          message: getMissingFNC1Warning(scan.symbologyIdentifier),
-        }],
-        hasGroupSeparators,
-      };
-    }
-    return {
-      gs1Confidence: "unlikely",
-      isCompliant: false,
-      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-      symbologyIdentifier: scan.symbologyIdentifier,
-      contentType: scan.contentType,
-      barcodeFormat: scan.format,
-      rawData: scan.text,
-      originalInput,
-      elements: [],
-      errors: [{
-        severity: "info",
-        message: "This does not appear to be a GS1 barcode. No GS1 Application Identifier structure detected in the data.",
-      }],
-      warnings: [],
-      hasGroupSeparators,
-    };
+  if (confidence === "likely") {
+    return handleLikely(gs, scan, normalizedText, ctx);
   }
 
-  // ITF-14 fallback: gs1encoder may not accept ]I1 prefix, so handle manually
+  // ITF-14 fallback: gs1encoder won't accept the ]I1 prefix, so handle manually.
   if (scan.symbologyIdentifier === "]I1") {
-    const itfResult = parseITF14(normalizedText, scan, originalInput, hasGroupSeparators);
+    const itfResult = parseITF14(normalizedText, scan, scan.scanData, hasGroupSeparators);
     if (itfResult) return itfResult;
   }
 
-  // Try to parse with gs1encoder (for "confirmed" barcodes)
-  try {
-    gs.scanData = normalizedScanData;
-
-    const hri = gs.hri;
-    const symId = gs.sym;
-    const symbologyName = SYMBOLOGY_NAMES[symId] ?? `GS1 Barcode (sym=${symId})`;
-    const elements = parseHRIElements(hri);
-
-    return {
-      gs1Confidence,
-      isCompliant: elements.length > 0,
-      symbology: symbologyName,
-      symbologyIdentifier: scan.symbologyIdentifier,
-      contentType: scan.contentType,
-      barcodeFormat: scan.format,
-      rawData: scan.text,
-      originalInput,
-      elements,
-      errors: [],
-      warnings: [],
-      hasGroupSeparators,
-    };
-  } catch (err) {
-    const message = err instanceof GS1encoderScanDataException || err instanceof GS1encoderParameterException
-      ? err.message
-      : String(err);
-
-    // For confirmed GS1 barcodes, try to still extract elements with relaxed validation.
-    // The validation error becomes a warning — the barcode IS valid GS1, just has association issues.
-    if (gs1Confidence === "confirmed") {
-      let relaxedElements: ParsedElement[] | null = null;
-      let relaxedSymbology = "";
-      try {
-        gs.validateAIassociations = false;
-        gs.scanData = normalizedScanData;
-        relaxedElements = parseHRIElements(gs.hri);
-        relaxedSymbology = SYMBOLOGY_NAMES[gs.sym] ?? `GS1 Barcode (sym=${gs.sym})`;
-      } catch {
-        // Relaxed parse also failed — fall through to substitute/bracketed checks.
-      } finally {
-        try { gs.validateAIassociations = true; } catch { /* ignore */ }
-      }
-
-      if (relaxedElements !== null) {
-        return {
-          gs1Confidence,
-          isCompliant: true, // It IS a valid GS1 barcode — associations are advisory
-          symbology: relaxedSymbology,
-          symbologyIdentifier: scan.symbologyIdentifier,
-          contentType: scan.contentType,
-          barcodeFormat: scan.format,
-          rawData: scan.text,
-          originalInput,
-          elements: relaxedElements,
-          errors: [],
-          warnings: [{
-            severity: "warning",
-            message,
-          }],
-          hasGroupSeparators,
-        };
-      }
-
-      {
-        for (const sub of GS_SUBSTITUTES) {
-          if (!normalizedText.includes(sub.char)) continue;
-          const fixedText = normalizedText.split(sub.char).join("\x1D");
-          const fixedScanData = scan.symbologyIdentifier + fixedText;
-          try {
-            gs.scanData = fixedScanData;
-            const fixedElements = parseHRIElements(gs.hri);
-            if (fixedElements.length > 1) {
-              return {
-                gs1Confidence,
-                isCompliant: false,
-                symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-                symbologyIdentifier: scan.symbologyIdentifier,
-                contentType: scan.contentType,
-                barcodeFormat: scan.format,
-                rawData: scan.text,
-                originalInput,
-                elements: fixedElements,
-                errors: [{
-                  severity: "error",
-                  message: `The ${sub.name} character is being used as a group separator instead of FNC1 (ASCII 29 / GS). The scanner or label software must be reconfigured to use the correct GS character.`,
-                }],
-                warnings: [],
-                hasGroupSeparators: true,
-              };
-            }
-          } catch { /* this substitute didn't help */ }
-        }
-
-        // Check if barcode literally contains bracketed HRI text
-        const bracketedResult = tryParseBracketed(gs, normalizedText);
-        if (bracketedResult) {
-          return {
-            gs1Confidence,
-            isCompliant: false,
-            symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-            symbologyIdentifier: scan.symbologyIdentifier,
-            contentType: scan.contentType,
-            barcodeFormat: scan.format,
-            rawData: scan.text,
-            originalInput,
-            elements: bracketedResult.elements,
-            errors: [{
-              severity: "error",
-              message: "This barcode contains the human-readable AI text (with parentheses) as its encoded data. The parentheses are NOT supposed to be in the barcode — they are only for printed human-readable text. The label software must encode the data with FNC1 separators, not parentheses.",
-            }, ...bracketedResult.errors],
-            warnings: [],
-            hasGroupSeparators,
-          };
-        }
-      }
-    }
-
-    return {
-      gs1Confidence,
-      isCompliant: false,
-      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
-      symbologyIdentifier: scan.symbologyIdentifier,
-      contentType: scan.contentType,
-      barcodeFormat: scan.format,
-      rawData: scan.text,
-      originalInput,
-      elements: [],
-      errors: [{
-        severity: "error",
-        message: `GS1 validation error: ${message}`,
-      }],
-      warnings: [],
-      hasGroupSeparators,
-    };
-  }
+  return handleConfirmed(gs, scan, normalizedScanData, normalizedText, ctx);
 }
 
 /**
@@ -713,6 +397,338 @@ function parseITF14(
     warnings: [],
     hasGroupSeparators,
   };
+}
+
+// ----- Result-building helpers -----
+
+// Fields of ParseResult that come from the scan and don't change as we
+// classify the data. Everything else (confidence, compliance, symbology,
+// elements, errors, warnings) is decided per code path.
+type ResultContext = {
+  symbologyIdentifier: string;
+  contentType: string;
+  barcodeFormat: string;
+  rawData: string;
+  originalInput: string;
+  hasGroupSeparators: boolean;
+};
+
+type ResultVariant = {
+  gs1Confidence: GS1Confidence;
+  isCompliant: boolean;
+  symbology: string;
+  elements: ParsedElement[];
+  errors: ValidationMessage[];
+  warnings: ValidationMessage[];
+  // Only set when this code path proves group separators exist (e.g. after
+  // substituting a wrong-GS character into the data).
+  hasGroupSeparators?: boolean;
+};
+
+function buildScanContext(scan: ScanResult, originalInput: string, hasGroupSeparators: boolean): ResultContext {
+  return {
+    symbologyIdentifier: scan.symbologyIdentifier,
+    contentType: scan.contentType,
+    barcodeFormat: scan.format,
+    rawData: scan.text,
+    originalInput,
+    hasGroupSeparators,
+  };
+}
+
+function makeResult(ctx: ResultContext, variant: ResultVariant): ParseResult {
+  return {
+    ...ctx,
+    ...variant,
+    hasGroupSeparators: variant.hasGroupSeparators ?? ctx.hasGroupSeparators,
+  };
+}
+
+// Messages that show up in more than one place.
+const BRACKETED_HRI_MESSAGE = "This barcode contains the human-readable AI text (with parentheses) as its encoded data. The parentheses are NOT supposed to be in the barcode — they are only for printed human-readable text. The label software must encode the data with FNC1 separators, not parentheses.";
+
+function gsSubstituteMessage(subName: string): string {
+  return `The ${subName} character is being used as a group separator instead of FNC1 (ASCII 29 / GS). The scanner or label software must be reconfigured to use the correct GS character.`;
+}
+
+// ----- Branch handlers -----
+
+// "Likely" branch: AIM ID is ]C0/]d1/]Q1 (or scanner reported non-GS1 content
+// type). gs1encoder won't accept those prefixes, so we go straight to retry
+// logic. Tries: digital link → AIM-prefix swap → wrong-GS substitution →
+// bracketed HRI → generic-AI-prefix fallback → downgrade.
+function handleLikely(
+  gs: GS1encoder,
+  scan: ScanResult,
+  normalizedText: string,
+  ctx: ResultContext,
+): ParseResult {
+  // GS1 Digital Link: a URL in a ]Q1 QR code is actually compliant — gs1encoder
+  // handles ]Q1 + URL natively (but NOT ]Q3 + URL).
+  if (/^https?:\/\//i.test(normalizedText)) {
+    const dl = tryParseDigitalLink(gs, scan.symbologyIdentifier, normalizedText);
+    if (dl) {
+      return makeResult(ctx, {
+        gs1Confidence: "confirmed",
+        isCompliant: true,
+        symbology: "GS1 Digital Link (QR Code)",
+        elements: dl.elements,
+        errors: dl.errors,
+        warnings: dl.warnings,
+      });
+    }
+  }
+
+  const retry = tryParseAsGS1(gs, scan.symbologyIdentifier, normalizedText);
+  if (retry) {
+    // Single-element parses from non-GS1 barcodes are often false positives —
+    // random data like "24000584" can accidentally match AI 240. Only trust a
+    // single-element parse if it's an AI that commonly appears alone (SSCC,
+    // GTIN) or if GS separators were present.
+    const isSuspicious = retry.elements.length === 1
+      && !ctx.hasGroupSeparators
+      && !["00", "01", "02"].includes(retry.elements[0]?.ai ?? "");
+
+    if (isSuspicious) {
+      return makeResult(ctx, {
+        gs1Confidence: "unlikely",
+        isCompliant: false,
+        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+        elements: [],
+        errors: [{
+          severity: "info",
+          message: "This does not appear to be a GS1 barcode. Data coincidentally matches AI structure but contains only a single element — likely a standard product or internal code.",
+        }],
+        warnings: [],
+      });
+    }
+
+    return makeResult(ctx, {
+      gs1Confidence: "likely",
+      isCompliant: false,
+      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+      elements: retry.elements,
+      errors: retry.errors,
+      warnings: [
+        { severity: "warning", message: getMissingFNC1Warning(scan.symbologyIdentifier) },
+        ...retry.warnings,
+      ],
+    });
+  }
+
+  // Wrong-GS substitution: some scanners/label software emit a printable char
+  // (%, ~, |) where FNC1 should be. If swapping the candidate to \x1D makes
+  // the data parse cleanly, that's the culprit.
+  const swap = trySubstituteGSCharsViaRetry(gs, scan.symbologyIdentifier, normalizedText);
+  if (swap) {
+    return makeResult(ctx, {
+      gs1Confidence: "likely",
+      isCompliant: false,
+      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+      elements: swap.result.elements,
+      errors: [
+        { severity: "error", message: gsSubstituteMessage(swap.subName) },
+        ...swap.result.errors,
+      ],
+      warnings: [
+        { severity: "warning", message: getMissingFNC1Warning(scan.symbologyIdentifier) },
+        ...swap.result.warnings,
+      ],
+      hasGroupSeparators: true,
+    });
+  }
+
+  const bracketed = tryParseBracketed(gs, normalizedText);
+  if (bracketed) {
+    return makeResult(ctx, {
+      gs1Confidence: "likely",
+      isCompliant: false,
+      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+      elements: bracketed.elements,
+      errors: [
+        { severity: "error", message: BRACKETED_HRI_MESSAGE },
+        ...bracketed.errors,
+      ],
+      warnings: [
+        { severity: "warning", message: getMissingFNC1Warning(scan.symbologyIdentifier) },
+      ],
+    });
+  }
+
+  // Nothing matched. If the data starts with two digits it plausibly has AI
+  // prefixes we couldn't decode (missing GS separators); keep "likely". If
+  // not, it's clearly not GS1 — downgrade.
+  if (/^\d{2}/.test(normalizedText)) {
+    return makeResult(ctx, {
+      gs1Confidence: "likely",
+      isCompliant: false,
+      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+      elements: [],
+      errors: [{
+        severity: "error",
+        message: "Data appears to contain GS1 AI prefixes but could not be fully parsed. Check for missing GS (FNC1) field separators between variable-length AIs.",
+      }],
+      warnings: [
+        { severity: "warning", message: getMissingFNC1Warning(scan.symbologyIdentifier) },
+      ],
+    });
+  }
+
+  return makeResult(ctx, {
+    gs1Confidence: "unlikely",
+    isCompliant: false,
+    symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+    elements: [],
+    errors: [{
+      severity: "info",
+      message: "This does not appear to be a GS1 barcode. No GS1 Application Identifier structure detected in the data.",
+    }],
+    warnings: [],
+  });
+}
+
+// "Confirmed" branch: AIM ID identifies a GS1 carrier, so we feed the data
+// straight to gs1encoder. If strict parse fails, fall through a ladder of
+// relaxed retries before giving up with a validation error.
+function handleConfirmed(
+  gs: GS1encoder,
+  scan: ScanResult,
+  normalizedScanData: string,
+  normalizedText: string,
+  ctx: ResultContext,
+): ParseResult {
+  try {
+    gs.scanData = normalizedScanData;
+    const elements = parseHRIElements(gs.hri);
+    const symbology = SYMBOLOGY_NAMES[gs.sym] ?? `GS1 Barcode (sym=${gs.sym})`;
+    return makeResult(ctx, {
+      gs1Confidence: "confirmed",
+      isCompliant: elements.length > 0,
+      symbology,
+      elements,
+      errors: [],
+      warnings: [],
+    });
+  } catch (err) {
+    const message = err instanceof GS1encoderScanDataException || err instanceof GS1encoderParameterException
+      ? err.message
+      : String(err);
+
+    // Some valid GS1 barcodes fail strict AI-association rules but are still
+    // structurally correct. Retry with associations disabled and downgrade the
+    // error to a warning.
+    const relaxed = tryRelaxedValidation(gs, normalizedScanData);
+    if (relaxed) {
+      return makeResult(ctx, {
+        gs1Confidence: "confirmed",
+        isCompliant: true,
+        symbology: relaxed.symbology,
+        elements: relaxed.elements,
+        errors: [],
+        warnings: [{ severity: "warning", message }],
+      });
+    }
+
+    const swap = trySubstituteGSCharsDirect(gs, scan.symbologyIdentifier, normalizedText);
+    if (swap) {
+      return makeResult(ctx, {
+        gs1Confidence: "confirmed",
+        isCompliant: false,
+        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+        elements: swap.elements,
+        errors: [{ severity: "error", message: gsSubstituteMessage(swap.subName) }],
+        warnings: [],
+        hasGroupSeparators: true,
+      });
+    }
+
+    const bracketed = tryParseBracketed(gs, normalizedText);
+    if (bracketed) {
+      return makeResult(ctx, {
+        gs1Confidence: "confirmed",
+        isCompliant: false,
+        symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+        elements: bracketed.elements,
+        errors: [
+          { severity: "error", message: BRACKETED_HRI_MESSAGE },
+          ...bracketed.errors,
+        ],
+        warnings: [],
+      });
+    }
+
+    return makeResult(ctx, {
+      gs1Confidence: "confirmed",
+      isCompliant: false,
+      symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+      elements: [],
+      errors: [{ severity: "error", message: `GS1 validation error: ${message}` }],
+      warnings: [],
+    });
+  }
+}
+
+// Retry the strict parse with AI-association validation disabled. Returns
+// the extracted elements/symbology, or null if even relaxed parsing fails.
+// validateAIassociations is restored in finally so the singleton can't leak
+// permissive state to subsequent callers.
+function tryRelaxedValidation(
+  gs: GS1encoder,
+  scanData: string,
+): { elements: ParsedElement[]; symbology: string } | null {
+  let elements: ParsedElement[] | null = null;
+  let symbology = "";
+  try {
+    gs.validateAIassociations = false;
+    gs.scanData = scanData;
+    elements = parseHRIElements(gs.hri);
+    symbology = SYMBOLOGY_NAMES[gs.sym] ?? `GS1 Barcode (sym=${gs.sym})`;
+  } catch {
+    // Relaxed parse also failed; let the caller try the next fallback.
+  } finally {
+    try { gs.validateAIassociations = true; } catch { /* ignore */ }
+  }
+  return elements === null ? null : { elements, symbology };
+}
+
+// Loop the known wrong-GS characters and try each as a substitute. Used in
+// the confirmed-error path where the scan prefix is already a GS1 AIM ID.
+function trySubstituteGSCharsDirect(
+  gs: GS1encoder,
+  symbologyIdentifier: string,
+  normalizedText: string,
+): { elements: ParsedElement[]; subName: string } | null {
+  for (const sub of GS_SUBSTITUTES) {
+    if (!normalizedText.includes(sub.char)) continue;
+    const fixedText = normalizedText.split(sub.char).join("\x1D");
+    try {
+      gs.scanData = symbologyIdentifier + fixedText;
+      const fixedElements = parseHRIElements(gs.hri);
+      if (fixedElements.length > 1) {
+        return { elements: fixedElements, subName: sub.name };
+      }
+    } catch { /* this substitute didn't help */ }
+  }
+  return null;
+}
+
+// Same idea but routed through tryParseAsGS1 (which swaps non-GS1 AIM IDs
+// to their GS1 equivalents). Used in the "likely" branch where the original
+// prefix is ]C0/]d1/]Q1 and gs1encoder would reject it as-is.
+function trySubstituteGSCharsViaRetry(
+  gs: GS1encoder,
+  symbologyIdentifier: string,
+  normalizedText: string,
+): { result: NonNullable<ReturnType<typeof tryParseAsGS1>>; subName: string } | null {
+  for (const sub of GS_SUBSTITUTES) {
+    if (!normalizedText.includes(sub.char)) continue;
+    const fixedText = normalizedText.split(sub.char).join("\x1D");
+    const result = tryParseAsGS1(gs, symbologyIdentifier, fixedText);
+    if (result && result.elements.length > 1) {
+      return { result, subName: sub.name };
+    }
+  }
+  return null;
 }
 
 /**
