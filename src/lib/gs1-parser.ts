@@ -62,6 +62,13 @@ function getEncoder(): Promise<GS1encoder> {
   return encoderPromise;
 }
 
+// Common characters scanners use as FNC1/GS (ASCII 29) substitutes
+const GS_SUBSTITUTES = [
+  { char: "%", name: "percent sign (%)" },
+  { char: "~", name: "tilde (~)" },
+  { char: "|", name: "pipe (|)" },
+];
+
 // Symbology ID → human-readable name
 const SYMBOLOGY_NAMES: Record<number, string> = {};
 
@@ -151,6 +158,34 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
 
     const retryResult = tryParseAsGS1(gs, scan.symbologyIdentifier, normalizedText);
     if (retryResult) {
+      // Single-element parses from non-GS1 barcodes are often false positives —
+      // random data like "24000584" can accidentally match AI 240.  Only trust a
+      // single-element parse if it's an AI that commonly appears alone (SSCC, GTIN)
+      // or if GS separators were present (strong signal of real GS1 structure).
+      const isSuspicious = retryResult.elements.length === 1
+        && !hasGroupSeparators
+        && !["00", "01", "02"].includes(retryResult.elements[0]?.ai ?? "");
+
+      if (isSuspicious) {
+        return {
+          gs1Confidence: "unlikely",
+          isCompliant: false,
+          symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+          symbologyIdentifier: scan.symbologyIdentifier,
+          contentType: scan.contentType,
+          barcodeFormat: scan.format,
+          rawData: scan.text,
+          originalInput,
+          elements: [],
+          errors: [{
+            severity: "info",
+            message: "This does not appear to be a GS1 barcode. Data coincidentally matches AI structure but contains only a single element — likely a standard product or internal code.",
+          }],
+          warnings: [],
+          hasGroupSeparators,
+        };
+      }
+
       return {
         gs1Confidence,
         isCompliant: false,
@@ -169,7 +204,38 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
         hasGroupSeparators,
       };
     }
-    // Retry failed — gs1encoder couldn't parse the AI structure.
+    // Retry failed — try detecting wrong group separator characters.
+    // Some scanners/systems substitute FNC1 (GS, ASCII 29) with a printable character.
+    // If replacing a candidate char with \x1D makes the data parse, that's the culprit.
+    for (const sub of GS_SUBSTITUTES) {
+      if (!normalizedText.includes(sub.char)) continue;
+      const fixedText = normalizedText.split(sub.char).join("\x1D");
+      const fixedResult = tryParseAsGS1(gs, scan.symbologyIdentifier, fixedText);
+      if (fixedResult && fixedResult.elements.length > 1) {
+        return {
+          gs1Confidence: "likely",
+          isCompliant: false,
+          symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+          symbologyIdentifier: scan.symbologyIdentifier,
+          contentType: scan.contentType,
+          barcodeFormat: scan.format,
+          rawData: scan.text,
+          originalInput,
+          elements: fixedResult.elements,
+          errors: [{
+            severity: "error",
+            message: `The ${sub.name} character is being used as a group separator instead of FNC1 (ASCII 29 / GS). The scanner or label software must be reconfigured to use the correct GS character.`,
+          }, ...fixedResult.errors],
+          warnings: [{
+            severity: "warning",
+            message: getMissingFNC1Warning(scan.symbologyIdentifier),
+          }, ...fixedResult.warnings],
+          hasGroupSeparators: true,
+        };
+      }
+    }
+
+    // No substitute char detected — fall back to generic error.
     // If the data starts with digits, it plausibly has GS1 AI prefixes but the parser
     // couldn't decode them (e.g. missing GS separators). Keep "likely".
     // If it doesn't start with digits, it's clearly not GS1 — downgrade to "unlikely".
@@ -279,8 +345,37 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
           hasGroupSeparators,
         };
       } catch {
-        // Relaxed parse also failed — fall through to error result
+        // Relaxed parse also failed — try detecting wrong group separator characters
         try { gs.validateAIassociations = true; } catch { /* ignore */ }
+
+        for (const sub of GS_SUBSTITUTES) {
+          if (!normalizedText.includes(sub.char)) continue;
+          const fixedText = normalizedText.split(sub.char).join("\x1D");
+          const fixedScanData = scan.symbologyIdentifier + fixedText;
+          try {
+            gs.scanData = fixedScanData;
+            const fixedElements = parseHRIElements(gs.hri);
+            if (fixedElements.length > 1) {
+              return {
+                gs1Confidence,
+                isCompliant: false,
+                symbology: mapSymbologyFromAIM(scan.symbologyIdentifier, scan.format),
+                symbologyIdentifier: scan.symbologyIdentifier,
+                contentType: scan.contentType,
+                barcodeFormat: scan.format,
+                rawData: scan.text,
+                originalInput,
+                elements: fixedElements,
+                errors: [{
+                  severity: "error",
+                  message: `The ${sub.name} character is being used as a group separator instead of FNC1 (ASCII 29 / GS). The scanner or label software must be reconfigured to use the correct GS character.`,
+                }],
+                warnings: [],
+                hasGroupSeparators: true,
+              };
+            }
+          } catch { /* this substitute didn't help */ }
+        }
       }
     }
 
