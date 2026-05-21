@@ -51,13 +51,49 @@ const READER_OPTIONS: ReaderOptions = {
 //
 // 1D mode: horizontal strip = base × pct tall, full container width.
 // 2D mode: centered square = base × pct on a side.
+// Full mode: no ROI — scan the whole frame. For oddball codes that don't
+// fit either preset (e.g. GS1 DataBar Stacked, which is wider than 1D's
+// strip and taller than 2D's square).
 const ROI_1D_BASE_PCT = 0.40;
 const ROI_2D_BASE_PCT = 0.65;
 
-type RoiMode = "1d" | "2d";
+type RoiMode = "1d" | "2d" | "full";
 type RoiRect = { x: number; y: number; w: number; h: number };
 
+const MODE_CYCLE: RoiMode[] = ["1d", "2d", "full"];
+const MODE_LABEL: Record<RoiMode, string> = { "1d": "1D", "2d": "2D", "full": "Full" };
+const MODE_DESCRIPTION: Record<RoiMode, string> = {
+  "1d": "1D barcode (horizontal strip)",
+  "2d": "2D barcode (centered square)",
+  "full": "Full frame (no aim region)",
+};
+
+function nextMode(mode: RoiMode): RoiMode {
+  return MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length]!;
+}
+
+// Persist the ROI mode so it survives "Scan Another" (which unmounts the
+// scanner) and full page reloads.
+const ROI_MODE_STORAGE_KEY = "gs1parser.roiMode";
+
+function loadStoredRoiMode(): RoiMode {
+  if (typeof window === "undefined") return "1d";
+  try {
+    const stored = window.localStorage.getItem(ROI_MODE_STORAGE_KEY);
+    if (stored === "1d" || stored === "2d" || stored === "full") return stored;
+  } catch { /* localStorage may be disabled; fall through */ }
+  return "1d";
+}
+
+function saveRoiMode(mode: RoiMode): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(ROI_MODE_STORAGE_KEY, mode); } catch { /* ignore */ }
+}
+
 function roiFromBase(mode: RoiMode, w: number, h: number, base: number): RoiRect {
+  if (mode === "full") {
+    return { x: 0, y: 0, w, h };
+  }
   if (mode === "1d") {
     const bh = Math.min(h, Math.floor(base * ROI_1D_BASE_PCT));
     return { x: 0, y: Math.floor((h - bh) / 2), w, h: bh };
@@ -90,7 +126,7 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const [scanLog, setScanLog] = useState<string[]>([]);
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
-  const [roiMode, setRoiMode] = useState<RoiMode>("1d");
+  const [roiMode, setRoiMode] = useState<RoiMode>(loadStoredRoiMode);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -99,7 +135,7 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const stoppedRef = useRef(false);
   // Mirror roiMode into a ref so the scan loop reads the current value each
   // tick without having to be torn down and recreated on toggle.
-  const roiModeRef = useRef<RoiMode>("1d");
+  const roiModeRef = useRef<RoiMode>(roiMode);
 
   const stopScanning = useCallback(() => {
     stoppedRef.current = true;
@@ -119,8 +155,9 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
 
   const toggleRoiMode = useCallback(() => {
     setRoiMode((prev) => {
-      const next: RoiMode = prev === "1d" ? "2d" : "1d";
+      const next = nextMode(prev);
       roiModeRef.current = next;
+      saveRoiMode(next);
       return next;
     });
   }, []);
@@ -330,10 +367,10 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
             )}
             <button
               onClick={toggleRoiMode}
-              aria-label={`Scan mode: ${roiMode === "1d" ? "1D barcode (horizontal strip)" : "2D barcode (rectangle)"}. Tap to switch to ${roiMode === "1d" ? "2D" : "1D"}.`}
+              aria-label={`Scan mode: ${MODE_DESCRIPTION[roiMode]}. Tap to switch to ${MODE_LABEL[nextMode(roiMode)]}.`}
               className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
             >
-              {roiMode === "1d" ? "1D" : "2D"}
+              {MODE_LABEL[roiMode]}
             </button>
           </>
         )}
@@ -365,8 +402,11 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
 // Aim overlay positioned over the video element. Measures the displayed
 // container so the 2D square sizes off the smaller dimension (which pure
 // CSS can't constrain cleanly), and so 1D height looks the same in
-// portrait and landscape. Uses the same `computeRoi` as the scan loop so
-// the visible band lines up with what readBarcodes actually sees.
+// portrait and landscape. Uses `computeOverlayRoi` so the visible band
+// lines up with what readBarcodes actually sees.
+//
+// In "full" mode the whole frame is scanned, so there's no aim band to
+// draw — render nothing.
 //
 // The container has `overflow-hidden`, so the huge box-shadow safely
 // dims everything outside the aim rect.
@@ -375,6 +415,10 @@ function RoiOverlay({ mode }: { mode: RoiMode }) {
   const [box, setBox] = useState<RoiRect | null>(null);
 
   useEffect(() => {
+    if (mode === "full") {
+      setBox(null);
+      return;
+    }
     const el = ref.current;
     if (!el) return;
     const update = () => {
@@ -395,6 +439,8 @@ function RoiOverlay({ mode }: { mode: RoiMode }) {
       window.removeEventListener("orientationchange", update);
     };
   }, [mode]);
+
+  if (mode === "full") return null;
 
   return (
     <div ref={ref} className="absolute inset-0 pointer-events-none">
