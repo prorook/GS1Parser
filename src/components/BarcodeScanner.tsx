@@ -27,8 +27,9 @@ const READER_OPTIONS: ReaderOptions = {
   formats: ["Code128", "QRCode", "DataMatrix", "DataBar", "EAN13", "EAN8", "ITF"],
   tryHarder: true,
   tryRotate: true,
-  tryDownscale: true,
-  downscaleThreshold: 1500,
+  // Long dense GS1-128 codes need full bar resolution. Internal downscaling
+  // smears narrow bars and tanks recognition on labels with 5–6 AIs.
+  tryDownscale: false,
   minLineCount: 1,
   maxNumberOfSymbols: 1,
 };
@@ -63,8 +64,9 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     stoppedRef.current = false;
     setIsScanning(true);
 
-    // Wait for video element to render
-    await new Promise((r) => setTimeout(r, 50));
+    // <video> is always mounted (just `hidden`), but React still needs a tick
+    // to flip the class before we touch the ref. One frame is enough.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
     const videoEl = videoRef.current;
     const canvasEl = canvasRef.current;
@@ -78,6 +80,9 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
+          // Long dense GS1-128 vendor labels need every bar to land on enough
+          // pixels to be distinguishable. Browser picks the best the camera
+          // can actually deliver.
           width: { ideal: 3840 },
           height: { ideal: 2160 },
           focusMode: { ideal: "continuous" },
@@ -89,9 +94,19 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
       await videoEl.play();
 
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true })!;
+      let frameSkip = 0;
 
       const scan = async () => {
         if (stoppedRef.current) return;
+
+        // Process every 2nd RAF. At 4K, one getImageData + readBarcodes cycle
+        // is already ~150–300 ms, so this mostly keeps us from queueing reads
+        // on slow devices rather than reducing real throughput.
+        frameSkip = (frameSkip + 1) % 2;
+        if (frameSkip !== 0) {
+          rafRef.current = requestAnimationFrame(scan);
+          return;
+        }
 
         // Grab frame as ImageData
         const { videoWidth, videoHeight } = videoEl;
