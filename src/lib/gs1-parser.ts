@@ -214,6 +214,7 @@ async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseR
         message: "Manual input — GS1 compliance cannot be fully confirmed without scanning the actual barcode.",
       });
     }
+    warnings.push(...validateGlobalSemantics(elements));
 
     return {
       gs1Confidence,
@@ -450,9 +451,11 @@ function buildScanContext(scan: ScanResult, originalInput: string, hasGroupSepar
 }
 
 function makeResult(ctx: ResultContext, variant: ResultVariant): ParseResult {
+  const globalWarnings = validateGlobalSemantics(variant.elements);
   return {
     ...ctx,
     ...variant,
+    warnings: [...variant.warnings, ...globalWarnings],
     hasGroupSeparators: variant.hasGroupSeparators ?? ctx.hasGroupSeparators,
   };
 }
@@ -801,6 +804,15 @@ function parseHRIElements(hri: string[]): ParsedElement[] {
   return elements;
 }
 
+// 6-digit YYMMDD date AIs. AI 7003 and the 11-digit date+time AIs are
+// intentionally omitted — handle them if real labels show them in the wild.
+const DATE_AIS = new Set(["11", "12", "13", "15", "16", "17"]);
+
+// GS1 US training / encoding-example company prefix. Used throughout GS1
+// documentation and sample labels; should never appear on a real vendor
+// shipment. Extend this set if other known training prefixes turn up.
+const TEST_COMPANY_PREFIXES = ["0614141"];
+
 // Per-element advisory checks beyond what gs1encoder already validates.
 // These warn about data that's syntactically valid GS1 but commonly wrong
 // for vendor logistic labels — the audit context this app is built for.
@@ -823,6 +835,77 @@ export function validateElementSemantics(ai: string, value: string): ValidationM
     out.push({
       severity: "warning",
       message: "GTIN indicator digit is 0 (consumer/base unit). On a vendor logistic label this usually means the inner consumer GTIN was encoded instead of a packaging-level GTIN (indicator 1–8) or variable-measure GTIN (indicator 9).",
+    });
+  }
+
+  // Day component of a YYMMDD date AI is "00". GS1 spec allows this (meaning
+  // "last day of the month"), but many WMS/ERP systems reject or misinterpret
+  // it. Vendors should specify an explicit day.
+  if (DATE_AIS.has(ai) && /^\d{6}$/.test(value) && value.substring(4, 6) === "00") {
+    out.push({
+      severity: "warning",
+      message: "Date day component is 00. GS1 allows this to mean \"last day of the month\", but many receiving systems reject or misinterpret it. The vendor should encode an explicit day.",
+    });
+  }
+
+  // Empty variable-length identifier. gs1encoder normally rejects these at
+  // parse time, so this check is mainly defensive — relaxed-validation and
+  // manual-input paths can still surface zero-length values.
+  if ((ai === "10" || ai === "21") && value.length === 0) {
+    const fieldName = ai === "10" ? "Batch/Lot number" : "Serial number";
+    out.push({
+      severity: "warning",
+      message: `${fieldName} is present but empty. This usually indicates a label-template bug — the AI was emitted with no associated value.`,
+    });
+  }
+
+  // GS1 training/example prefix on a real label. In GTIN-14 the indicator
+  // digit occupies position 0, so the company prefix starts at position 1.
+  if ((ai === "01" || ai === "02") && value.length === 14) {
+    const companyPrefix = value.substring(1, 8);
+    if (TEST_COMPANY_PREFIXES.includes(companyPrefix)) {
+      out.push({
+        severity: "warning",
+        message: `GTIN uses the GS1 training/example company prefix (${companyPrefix}). This prefix is reserved for documentation and sample labels — production labels must use the vendor's own assigned GS1 company prefix.`,
+      });
+    }
+  }
+
+  return out;
+}
+
+// Cross-element checks. Run once per parsed label, on whatever element set
+// the parser produced.
+export function validateGlobalSemantics(elements: ParsedElement[]): ValidationMessage[] {
+  const out: ValidationMessage[] = [];
+
+  // Duplicate AI on a single label. In standard GS1 AI syntax each AI should
+  // appear at most once per data carrier — duplicates almost always mean the
+  // label software concatenated two records into one barcode.
+  const aiCounts = new Map<string, number>();
+  for (const el of elements) {
+    aiCounts.set(el.ai, (aiCounts.get(el.ai) ?? 0) + 1);
+  }
+  const dupes = [...aiCounts.entries()].filter(([, count]) => count > 1);
+  if (dupes.length > 0) {
+    const detail = dupes.map(([ai, count]) => `AI (${ai}) × ${count}`).join(", ");
+    out.push({
+      severity: "warning",
+      message: `Duplicate Application Identifier(s) on a single label: ${detail}. Each AI should normally appear at most once — this usually means the label software concatenated multiple records into one barcode.`,
+    });
+  }
+
+  // Variable-measure GTIN (indicator digit 9) without a companion measurement
+  // AI. Without a 31xx/32xx/33xx/35xx/36xx weight/length/area/volume value,
+  // the receiver has no way to know the actual quantity of the trade item.
+  const hasVariableMeasureGTIN = elements.some(
+    (el) => el.ai === "01" && el.rawValue.length === 14 && el.rawValue.startsWith("9"),
+  );
+  const hasMeasurementAI = elements.some((el) => /^3[1-6]\d{2}$/.test(el.ai));
+  if (hasVariableMeasureGTIN && !hasMeasurementAI) {
+    out.push({
+      severity: "warning",
+      message: "Variable-measure GTIN (indicator digit 9) is present but the label has no measurement AI (e.g. 310x net weight kg, 320x net weight lb, 350x area, 357x net volume). Variable-measure trade items must include the measurement on the label so the receiver knows the actual quantity.",
     });
   }
 
