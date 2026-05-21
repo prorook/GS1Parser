@@ -39,9 +39,12 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [scanLog, setScanLog] = useState<string[]>([]);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const videoTrackRef = useRef<MediaStreamTrack | null>(null);
   const rafRef = useRef<number>(0);
   const stoppedRef = useRef(false);
 
@@ -52,11 +55,28 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
+    videoTrackRef.current = null;
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
     setIsScanning(false);
+    setTorchSupported(false);
+    setTorchOn(false);
   }, []);
+
+  const toggleTorch = useCallback(async () => {
+    const track = videoTrackRef.current;
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      // `torch` isn't in the standard MediaTrackConstraintSet type but is
+      // supported on most mobile Chrome/Edge builds.
+      await track.applyConstraints({ advanced: [{ torch: next } as MediaTrackConstraintSet] });
+      setTorchOn(next);
+    } catch (err) {
+      setError(`Torch error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [torchOn]);
 
   const startScanning = useCallback(async () => {
     setError(null);
@@ -92,6 +112,14 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
       streamRef.current = stream;
       videoEl.srcObject = stream;
       await videoEl.play();
+
+      // Probe for torch support on the chosen video track.
+      const track = stream.getVideoTracks()[0] ?? null;
+      videoTrackRef.current = track;
+      if (track && typeof track.getCapabilities === "function") {
+        const caps = track.getCapabilities() as MediaTrackCapabilities & { torch?: boolean };
+        setTorchSupported(caps.torch === true);
+      }
 
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true })!;
       let frameSkip = 0;
@@ -143,10 +171,13 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
               // Stop camera
               stream.getTracks().forEach((t) => t.stop());
               streamRef.current = null;
+              videoTrackRef.current = null;
               videoEl.srcObject = null;
 
               setLastScan(`${r.symbologyIdentifier}${r.text.substring(0, 60)}`);
               setIsScanning(false);
+              setTorchSupported(false);
+              setTorchOn(false);
               onScan(scanResult);
               return;
             }
@@ -207,13 +238,25 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
             <span aria-hidden="true">📷 </span>Scan Barcode
           </button>
         ) : (
-          <button
-            onClick={stopScanning}
-            aria-label="Stop scanning"
-            className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors"
-          >
-            <span aria-hidden="true">⏹ </span>Stop
-          </button>
+          <>
+            <button
+              onClick={stopScanning}
+              aria-label="Stop scanning"
+              className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors"
+            >
+              <span aria-hidden="true">⏹ </span>Stop
+            </button>
+            {torchSupported && (
+              <button
+                onClick={toggleTorch}
+                aria-label={torchOn ? "Turn flashlight off" : "Turn flashlight on"}
+                aria-pressed={torchOn}
+                className={`px-6 py-3 font-medium rounded-lg transition-colors ${torchOn ? "bg-yellow-500 hover:bg-yellow-600 text-gray-900" : "bg-gray-700 hover:bg-gray-600 text-white"}`}
+              >
+                <span aria-hidden="true">🔦 </span>{torchOn ? "On" : "Off"}
+              </button>
+            )}
+          </>
         )}
       </div>
 
