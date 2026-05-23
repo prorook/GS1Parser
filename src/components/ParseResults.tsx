@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ParseResult, Severity } from "../lib/gs1-parser";
 
 interface ParseResultsProps {
@@ -6,6 +7,11 @@ interface ParseResultsProps {
 
 export function ParseResults({ result }: ParseResultsProps) {
   const { gs1Confidence, isCompliant, symbology, symbologyIdentifier, contentType, barcodeFormat, elements, errors, warnings, rawData } = result;
+  // Initial open state mirrors the historical default (auto-open when there
+  // are no parsed elements, so the user can see what failed to parse), but
+  // becomes user-controlled afterwards — React would otherwise force the open
+  // attribute back on every re-render, undoing the user's manual toggle.
+  const [rawOpen, setRawOpen] = useState(elements.length === 0);
 
   return (
     <div className="w-full max-w-lg mx-auto space-y-4">
@@ -115,7 +121,7 @@ export function ParseResults({ result }: ParseResultsProps) {
 
       {/* Raw Data & Human Readable */}
       <div className="space-y-2">
-        <details className="text-sm" open={elements.length === 0}>
+        <details className="text-sm" open={rawOpen} onToggle={(e) => setRawOpen(e.currentTarget.open)}>
           <summary className="text-gray-500 cursor-pointer hover:text-gray-300">
             Raw barcode data
           </summary>

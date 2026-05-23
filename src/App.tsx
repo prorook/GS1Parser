@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { BarcodeScanner, type ScanResult } from "./components/BarcodeScanner";
 import { ParseResults } from "./components/ParseResults";
 import { parseGS1ScanData, parseGS1Manual, type ParseResult } from "./lib/gs1-parser";
@@ -9,14 +9,23 @@ export default function App() {
   const [showManual, setShowManual] = useState(false);
   const [parsing, setParsing] = useState(false);
 
+  // Incremented on every scan/manual-parse request. Only the handler whose
+  // id still matches the ref commits its result — older in-flight parses
+  // (rapid re-scans, switching from scan to manual mid-parse) are discarded
+  // so the screen always reflects the user's most recent intent.
+  const requestIdRef = useRef(0);
+
   const handleScan = useCallback(
     async (scan: ScanResult) => {
+      const myId = ++requestIdRef.current;
       setParsing(true);
       try {
         const parsed = await parseGS1ScanData(scan);
+        if (requestIdRef.current !== myId) return;
         setResult(parsed);
       } catch (err) {
         console.error("Parse error:", err);
+        if (requestIdRef.current !== myId) return;
         setResult({
           gs1Confidence: "unlikely",
           isCompliant: false,
@@ -32,7 +41,7 @@ export default function App() {
           hasGroupSeparators: scan.text.includes("\x1D"),
         });
       } finally {
-        setParsing(false);
+        if (requestIdRef.current === myId) setParsing(false);
       }
     },
     []
@@ -40,14 +49,33 @@ export default function App() {
 
   const handleManualParse = useCallback(async () => {
     if (!manualInput.trim()) return;
+    const myId = ++requestIdRef.current;
     setParsing(true);
     try {
       // Replace literal "<GS>" with actual GS character for testing
       const cleaned = manualInput.replace(/<GS>/gi, "\x1D");
       const parsed = await parseGS1Manual(cleaned);
+      if (requestIdRef.current !== myId) return;
       setResult(parsed);
+    } catch (err) {
+      console.error("Parse error:", err);
+      if (requestIdRef.current !== myId) return;
+      setResult({
+        gs1Confidence: "unlikely",
+        isCompliant: false,
+        symbology: "Unknown",
+        symbologyIdentifier: "",
+        contentType: "Unknown",
+        barcodeFormat: "Manual Input",
+        rawData: manualInput,
+        originalInput: manualInput,
+        elements: [],
+        errors: [{ severity: "error", message: `Parser error: ${err instanceof Error ? err.message : String(err)}` }],
+        warnings: [],
+        hasGroupSeparators: manualInput.includes("\x1D"),
+      });
     } finally {
-      setParsing(false);
+      if (requestIdRef.current === myId) setParsing(false);
     }
   }, [manualInput]);
 

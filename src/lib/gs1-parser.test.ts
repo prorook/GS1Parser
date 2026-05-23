@@ -491,5 +491,190 @@ describe("GS1 Parser (gs1encoder)", () => {
       expect(result.errors[0]?.message).toContain("parentheses");
       expect(result.errors[0]?.message).toContain("human-readable");
     });
+
+    it("on ]C0 carrier, does NOT emit the contradictory missing-FNC1 warning alongside the bracketed-HRI error", async () => {
+      // Same bracketed-HRI payload but wrapped in a non-GS1 Code 128 (]C0).
+      // The bracketed-HRI message already tells the vendor to use FNC1 instead
+      // of parentheses — appending the generic missing-FNC1 warning would be a
+      // contradictory second diagnosis for the same defect.
+      const scan = makeScanResult({
+        scanData: "]C0(01)0001159022019(11)211117(17)220418(30)12(10)21321200212",
+        symbologyIdentifier: "]C0",
+        text: "(01)0001159022019(11)211117(17)220418(30)12(10)21321200212",
+        contentType: "Text",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.errors.some((e) => e.message.includes("parentheses"))).toBe(true);
+      expect(result.warnings.some((w) => w.message.includes("FNC1"))).toBe(false);
+    });
+  });
+
+  describe("Manual input — Digital Link validation", () => {
+    it("does NOT mark a non-GS1 URL as a confirmed Digital Link", async () => {
+      // Plain URL with no GS1 keys — gs1encoder will not extract elements.
+      const result = await parseGS1Manual("https://example.com/foo");
+      expect(result.gs1Confidence).toBe("unlikely");
+      expect(result.isCompliant).toBe(false);
+      expect(result.errors.some((e) => e.message.includes("Digital Link"))).toBe(true);
+    });
+
+    it("marks a real GS1 Digital Link with /01/<GTIN> as confirmed", async () => {
+      const result = await parseGS1Manual("https://id.gs1.org/01/00614141123452");
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(true);
+      expect(result.elements.some((e) => e.ai === "01")).toBe(true);
+    });
+  });
+
+  describe("Manual input — symbology label", () => {
+    it("labels bracketed AI input as 'Bracketed AI text', not whatever sym a prior scan set", async () => {
+      // Run a real QR scan first so the singleton's gs.sym is QR.
+      await parseGS1ScanData(makeScanResult({
+        scanData: "]Q30100614141123452",
+        symbologyIdentifier: "]Q3",
+        text: "0100614141123452",
+        contentType: "GS1",
+        format: "QRCode",
+      }));
+      // Now parse bracketed manual input — must NOT report 'GS1 QR Code'.
+      const result = await parseGS1Manual("(01)00614141123452");
+      expect(result.symbology).toBe("Bracketed AI text");
+    });
+  });
+
+  describe("Relaxed-validation result is non-compliant, not compliant", () => {
+    it("when a strict GS1 parse fails on AI associations but elements still extract, result is isCompliant: false with an error (not a misleading warning)", async () => {
+      // AI 02 (content GTIN of an inner trade item) requires AI 37 (count of
+      // items). A label with just (02)... fails strict AI-association rules.
+      const scan = makeScanResult({
+        scanData: "]C10200614141123452",
+        symbologyIdentifier: "]C1",
+        text: "0200614141123452",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      // Whichever validation path runs, a label failing GS1's own rules must
+      // never be reported as compliant by an audit product.
+      if (result.errors.length === 0 && result.warnings.some((w) => w.message.toLowerCase().includes("association"))) {
+        throw new Error("Association violation was demoted to warning — must be an error.");
+      }
+      // If gs1encoder treats (02) alone as an association violation, it should
+      // land in the relaxed branch with isCompliant: false.
+      if (result.gs1Confidence === "confirmed" && result.errors.length > 0) {
+        expect(result.isCompliant).toBe(false);
+      }
+    });
+  });
+
+  describe("Empty AIM symbology identifier with GS1 contentType", () => {
+    it("infers a sensible AIM ID from `format` so the parse still has a chance", async () => {
+      // zxing-cpp sometimes returns contentType='GS1' but no symbologyIdentifier.
+      const scan = makeScanResult({
+        scanData: "0100614141123452",
+        symbologyIdentifier: "",
+        text: "0100614141123452",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(true);
+      expect(result.elements[0]?.ai).toBe("01");
+    });
+  });
+
+  describe("Digital Link in a non-QR carrier", () => {
+    it("recovers a Digital Link printed into a Code 128 (]C0) by trying ]Q1 as fallback", async () => {
+      const scan = makeScanResult({
+        scanData: "]C0https://id.gs1.org/01/00614141123452",
+        symbologyIdentifier: "]C0",
+        text: "https://id.gs1.org/01/00614141123452",
+        contentType: "Text",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      // The DL recovery path runs in handleLikely — should now succeed via ]Q1
+      // fallback and extract the GTIN.
+      expect(result.elements.some((e) => e.ai === "01")).toBe(true);
+    });
+  });
+
+  describe("Single-AI bracketed HRI label", () => {
+    it("detects a single (01)GTIN bracketed-HRI mistake (previously slipped past the ≥2 AI gate)", async () => {
+      const scan = makeScanResult({
+        scanData: "]C1(01)00614141123452",
+        symbologyIdentifier: "]C1",
+        text: "(01)00614141123452",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.errors.some((e) => e.message.includes("parentheses"))).toBe(true);
+      expect(result.elements.some((e) => e.ai === "01")).toBe(true);
+    });
+  });
+
+  describe("Scan-data <GS> sentinel normalization", () => {
+    it("normalizes lowercase <gs> the same as uppercase <GS> (case-insensitive, matching App.tsx manual path)", async () => {
+      const scan = makeScanResult({
+        scanData: "]C1010061414112345217251231<gs>10ABC123",
+        symbologyIdentifier: "]C1",
+        text: "010061414112345217251231<gs>10ABC123",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("confirmed");
+      expect(result.isCompliant).toBe(true);
+      expect(result.elements.length).toBe(3);
+    });
+  });
+
+  describe("Empty-elements strict-success diagnostic", () => {
+    it("does not change behavior for a normal multi-element parse (regression guard)", async () => {
+      const scan = makeScanResult({
+        scanData: "]C10100614141123452",
+        symbologyIdentifier: "]C1",
+        text: "0100614141123452",
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.isCompliant).toBe(true);
+      expect(result.errors.length).toBe(0);
+    });
+  });
+
+  describe("Ambiguous single-GTIN on non-GS1 carrier", () => {
+    it("adds an info-level qualifier when only AI (01) is decoded from a ]C0 Code 128", async () => {
+      const scan = makeScanResult({
+        scanData: "]C00100614141123452",
+        symbologyIdentifier: "]C0",
+        text: "0100614141123452",
+        contentType: "Text",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.gs1Confidence).toBe("likely");
+      expect(result.elements.length).toBe(1);
+      expect(result.elements[0]?.ai).toBe("01");
+      expect(result.warnings.some((w) => w.severity === "info" && w.message.includes("coincidental"))).toBe(true);
+    });
+
+    it("does NOT add the qualifier when multiple elements decode (clearly a real GS1 label missing FNC1)", async () => {
+      // ]C0 with two AIs joined by GS — unmistakably intentional GS1 data.
+      const scan = makeScanResult({
+        scanData: "]C00100614141123452\x1D10ABC",
+        symbologyIdentifier: "]C0",
+        text: "0100614141123452\x1D10ABC",
+        contentType: "Text",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.elements.length).toBeGreaterThan(1);
+      expect(result.warnings.some((w) => w.severity === "info" && w.message.includes("coincidental"))).toBe(false);
+    });
   });
 });

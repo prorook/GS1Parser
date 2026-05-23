@@ -54,10 +54,17 @@ let encoderPromise: Promise<GS1encoder> | null = null;
 
 function getEncoder(): Promise<GS1encoder> {
   if (!encoderPromise) {
-    encoderPromise = GS1encoder.create().then(gs => {
+    const p = GS1encoder.create().then(gs => {
       gs.includeDataTitlesInHRI = true;
       return gs;
     });
+    // Don't cache a rejected promise forever — a transient WASM-load failure
+    // would otherwise wedge the parser for the page lifetime. Clear the slot
+    // (only if it's still this same promise) so the next caller retries.
+    p.catch(() => {
+      if (encoderPromise === p) encoderPromise = null;
+    });
+    encoderPromise = p;
   }
   return encoderPromise;
 }
@@ -124,13 +131,26 @@ export async function parseGS1ScanData(scan: ScanResult): Promise<ParseResult> {
 }
 
 async function parseGS1ScanDataImpl(gs: GS1encoder, scan: ScanResult): Promise<ParseResult> {
-  // zxing-wasm may encode GS (ASCII 29) as literal "<GS>" text — normalize to \x1D
-  const normalizedText = scan.text.replace(/<GS>/g, "\x1D");
-  const normalizedScanData = scan.symbologyIdentifier + normalizedText;
-  const hasGroupSeparators = normalizedText.includes("\x1D");
-  const ctx = buildScanContext(scan, scan.scanData, hasGroupSeparators);
+  // zxing-wasm may encode GS (ASCII 29) as literal "<GS>" text — normalize to \x1D.
+  // Case-insensitive to match the manual-input path in App.tsx and tolerate
+  // any-cased sentinel from upstream tools.
+  const normalizedText = scan.text.replace(/<GS>/gi, "\x1D");
 
-  const confidence = determineConfidence(scan.contentType, scan.symbologyIdentifier);
+  // Some scanners (or zxing builds) report contentType="GS1" but leave the
+  // AIM symbology identifier empty. gs1encoder requires the prefix to detect
+  // the carrier — without it every retry fails with an opaque message. Infer
+  // a sensible default from `format` so the parser still has a chance.
+  const effectiveSymId = scan.symbologyIdentifier
+    || (scan.contentType === "GS1" ? inferAIMFromFormat(scan.format) : "");
+  const effectiveScan = effectiveSymId === scan.symbologyIdentifier
+    ? scan
+    : { ...scan, symbologyIdentifier: effectiveSymId };
+
+  const normalizedScanData = effectiveSymId + normalizedText;
+  const hasGroupSeparators = normalizedText.includes("\x1D");
+  const ctx = buildScanContext(effectiveScan, scan.scanData, hasGroupSeparators);
+
+  const confidence = determineConfidence(scan.contentType, effectiveSymId);
 
   if (confidence === "unlikely") {
     return makeResult(ctx, {
@@ -147,17 +167,30 @@ async function parseGS1ScanDataImpl(gs: GS1encoder, scan: ScanResult): Promise<P
   }
 
   if (confidence === "likely") {
-    return handleLikely(gs, scan, normalizedText, ctx);
+    return handleLikely(gs, effectiveScan, normalizedText, ctx);
   }
 
   // ITF-14: gs1encoder won't accept the ]I1 prefix, so parse it ourselves.
   // parseITF14 always returns a result (handles malformed data with a clear
   // error rather than falling through to a confusing gs1encoder rejection).
-  if (scan.symbologyIdentifier === "]I1") {
+  if (effectiveSymId === "]I1") {
     return parseITF14(normalizedText, ctx);
   }
 
-  return handleConfirmed(gs, scan, normalizedScanData, normalizedText, ctx);
+  return handleConfirmed(gs, effectiveScan, normalizedScanData, normalizedText, ctx);
+}
+
+// Default AIM symbology identifier per zxing format name. Used when the
+// scanner reports contentType="GS1" but leaves symbologyIdentifier empty.
+function inferAIMFromFormat(format: string): string {
+  switch (format) {
+    case "Code128": return "]C1";
+    case "DataMatrix": return "]d2";
+    case "QRCode": return "]Q3";
+    case "DataBar": return "]e0";
+    case "ITF": return "]I1";
+    default: return "";
+  }
 }
 
 /**
@@ -200,15 +233,47 @@ async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseR
     }
 
     const hri = gs.hri;
-    const symId = gs.sym;
-    const symbologyName = isDigitalLink ? "GS1 Digital Link" : (SYMBOLOGY_NAMES[symId] ?? "GS1 Barcode");
     const elements = parseHRIElements(hri);
 
-    const gs1Confidence: GS1Confidence = (hasAIMPrefix || isDigitalLink) ? "confirmed" : "likely";
+    // gs1encoder's `sym` field is only auto-set by `scanData` — `aiDataStr`
+    // and `dataStr` leave whatever the previous scanData parse left on the
+    // singleton. Pick the symbology label from the input branch we actually
+    // took, not from the stale singleton field.
+    let symbologyName: string;
+    if (isBracketed) {
+      symbologyName = "Bracketed AI text";
+    } else if (isDigitalLink) {
+      symbologyName = "GS1 Digital Link";
+    } else if (!hasAIMPrefix && input.startsWith("^")) {
+      symbologyName = "GS1 element string";
+    } else {
+      // hasAIMPrefix OR the default ]C1 fallback — both went through scanData
+      // so gs.sym is up to date.
+      symbologyName = SYMBOLOGY_NAMES[gs.sym] ?? "GS1 Barcode";
+    }
+
+    // A URL that parses without producing any GS1 elements is NOT a Digital
+    // Link — gs1encoder may accept arbitrary URLs without throwing. Downgrade
+    // to "unlikely" and explain.
+    const isValidDigitalLink = isDigitalLink && elements.length > 0;
+    const gs1Confidence: GS1Confidence = hasAIMPrefix
+      ? "confirmed"
+      : isValidDigitalLink
+        ? "confirmed"
+        : isDigitalLink
+          ? "unlikely"
+          : "likely";
+
     const aimPrefix = hasAIMPrefix ? input.substring(0, 3) : "";
     const warnings: ValidationMessage[] = [];
+    const errors: ValidationMessage[] = [];
 
-    if (!hasAIMPrefix && !isDigitalLink) {
+    if (isDigitalLink && !isValidDigitalLink) {
+      errors.push({
+        severity: "error",
+        message: "URL does not appear to be a GS1 Digital Link. A valid Digital Link must contain a primary key (e.g. /01/<GTIN> or /00/<SSCC>).",
+      });
+    } else if (!hasAIMPrefix && !isDigitalLink) {
       warnings.push({
         severity: "warning",
         message: "Manual input — GS1 compliance cannot be fully confirmed without scanning the actual barcode.",
@@ -221,12 +286,12 @@ async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseR
       isCompliant: elements.length > 0 && gs1Confidence === "confirmed",
       symbology: symbologyName,
       symbologyIdentifier: aimPrefix,
-      contentType: isDigitalLink ? "GS1 Digital Link" : hasAIMPrefix ? "GS1" : "Manual",
+      contentType: isValidDigitalLink ? "GS1 Digital Link" : hasAIMPrefix ? "GS1" : "Manual",
       barcodeFormat: "Manual Input",
       rawData: input,
       originalInput,
       elements,
-      errors: [],
+      errors,
       warnings,
       hasGroupSeparators,
     };
@@ -235,10 +300,17 @@ async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseR
       ? err.message
       : err instanceof Error ? err.message : String(err);
 
+    // For URL input that gs1encoder rejected, the user pasted something that
+    // looks like a URL but isn't a GS1 Digital Link. Lead with that diagnosis
+    // — the raw encoder message ("scanData starts with...") is opaque.
+    const errorMessage = isDigitalLink
+      ? `URL does not appear to be a GS1 Digital Link. A valid Digital Link must contain a primary key (e.g. /01/<GTIN> or /00/<SSCC>). (${message})`
+      : `Parse error: ${message}`;
+
     return {
       gs1Confidence: "unlikely",
       isCompliant: false,
-      symbology: "Unknown",
+      symbology: isDigitalLink ? "Not a Digital Link" : "Unknown",
       symbologyIdentifier: "",
       contentType: "Unknown",
       barcodeFormat: "Manual Input",
@@ -247,7 +319,7 @@ async function parseGS1ManualImpl(gs: GS1encoder, input: string): Promise<ParseR
       elements: [],
       errors: [{
         severity: "error",
-        message: `Parse error: ${message}`,
+        message: errorMessage,
       }],
       warnings: [],
       hasGroupSeparators,
@@ -266,12 +338,12 @@ function tryParseBracketed(
 ): { elements: ParsedElement[]; errors: ValidationMessage[]; warnings: ValidationMessage[] } | null {
   if (!/^\(\d{2,4}\)/.test(text)) return null;
 
-  // Must have at least 2 bracketed AI patterns to be confident this is HRI text
   const aiPattern = /\(\d{2,4}\)/g;
   const matches = text.match(aiPattern);
-  if (!matches || matches.length < 2) return null;
+  if (!matches) return null;
 
-  // Try to parse with gs1encoder for proper element extraction
+  // Try gs1encoder first — if it extracts elements, the bracketed shape is
+  // confirmed regardless of how many AIs were present.
   try {
     gs.aiDataStr = text;
     const elements = parseHRIElements(gs.hri);
@@ -279,11 +351,15 @@ function tryParseBracketed(
       return { elements, errors: [], warnings: [] };
     }
   } catch {
-    // Parsing failed (e.g. wrong field length, bad check digit) but the pattern
-    // is unmistakably bracketed HRI text. Return empty elements with a note.
+    // fall through to multi-AI heuristic
   }
 
-  // Pattern is clearly bracketed AI text even if gs1encoder can't validate it
+  // gs1encoder couldn't parse. For multi-AI patterns (≥2 bracketed AIs) the
+  // shape is unmistakable — surface the diagnostic anyway. For single-AI
+  // patterns the risk of false-positive on random data like "(99)X" is too
+  // high; bail out so the caller doesn't tag the result as bracketed-HRI.
+  if (matches.length < 2) return null;
+
   return { elements: [], errors: [{
     severity: "warning",
     message: "Could not fully validate the AI data (possible field length or check digit error), but the bracketed format was detected.",
@@ -480,9 +556,14 @@ function handleLikely(
   ctx: ResultContext,
 ): ParseResult {
   // GS1 Digital Link: a URL in a ]Q1 QR code is actually compliant — gs1encoder
-  // handles ]Q1 + URL natively (but NOT ]Q3 + URL).
+  // handles ]Q1 + URL natively (but NOT ]Q3 + URL). Try the original AIM ID
+  // first, then fall back to ]Q1 — Digital Link URLs printed into Code 128
+  // (]C0) or DataMatrix (]d1) carriers do show up in the wild on test labels.
   if (/^https?:\/\//i.test(normalizedText)) {
-    const dl = tryParseDigitalLink(gs, scan.symbologyIdentifier, normalizedText);
+    const dl = tryParseDigitalLink(gs, scan.symbologyIdentifier, normalizedText)
+      ?? (scan.symbologyIdentifier !== "]Q1"
+        ? tryParseDigitalLink(gs, "]Q1", normalizedText)
+        : null);
     if (dl) {
       return makeResult(ctx, {
         gs1Confidence: "confirmed",
@@ -501,9 +582,10 @@ function handleLikely(
     // random data like "24000584" can accidentally match AI 240. Only trust a
     // single-element parse if it's an AI that commonly appears alone (SSCC,
     // GTIN) or if GS separators were present.
-    const isSuspicious = retry.elements.length === 1
-      && !ctx.hasGroupSeparators
-      && !["00", "01", "02"].includes(retry.elements[0]?.ai ?? "");
+    const onlyAI = retry.elements.length === 1 && !ctx.hasGroupSeparators
+      ? (retry.elements[0]?.ai ?? "")
+      : null;
+    const isSuspicious = onlyAI !== null && !["00", "01", "02"].includes(onlyAI);
 
     if (isSuspicious) {
       return makeResult(ctx, {
@@ -519,6 +601,21 @@ function handleLikely(
       });
     }
 
+    // A single (01) GTIN or (02) content-GTIN on a non-GS1 carrier is
+    // legitimate-looking GS1 data — it MIGHT be a vendor whose label is
+    // missing FNC1, OR a coincidental 14-digit numeric whose check digit
+    // happens to satisfy GTIN-14 math. Surface the ambiguity so the auditor
+    // doesn't take the GTIN at face value. (AI 00 / SSCC needs 18 digits
+    // and is unmistakable, so no qualifier there.)
+    const ambiguousSingleGTIN = onlyAI === "01" || onlyAI === "02";
+    const extras: ValidationMessage[] = [];
+    if (ambiguousSingleGTIN) {
+      extras.push({
+        severity: "info",
+        message: "Single GTIN-shaped element decoded on a non-GS1 carrier. This may be a GS1 label missing FNC1, or a coincidental 14-digit numeric whose check digit happens to satisfy GTIN-14 math. Verify with the vendor before treating as a real GTIN.",
+      });
+    }
+
     return makeResult(ctx, {
       gs1Confidence: "likely",
       isCompliant: false,
@@ -527,6 +624,7 @@ function handleLikely(
       errors: retry.errors,
       warnings: [
         { severity: "warning", message: getMissingFNC1Warning(scan.symbologyIdentifier) },
+        ...extras,
         ...retry.warnings,
       ],
     });
@@ -556,6 +654,9 @@ function handleLikely(
 
   const bracketed = tryParseBracketed(gs, normalizedText);
   if (bracketed) {
+    // BRACKETED_HRI_MESSAGE already tells the vendor "encode with FNC1, not
+    // parentheses" — appending the generic missing-FNC1 warning here would be
+    // a contradictory second diagnosis for the same defect.
     return makeResult(ctx, {
       gs1Confidence: "likely",
       isCompliant: false,
@@ -565,9 +666,7 @@ function handleLikely(
         { severity: "error", message: BRACKETED_HRI_MESSAGE },
         ...bracketed.errors,
       ],
-      warnings: [
-        { severity: "warning", message: getMissingFNC1Warning(scan.symbologyIdentifier) },
-      ],
+      warnings: [],
     });
   }
 
@@ -617,12 +716,22 @@ function handleConfirmed(
     gs.scanData = normalizedScanData;
     const elements = parseHRIElements(gs.hri);
     const symbology = SYMBOLOGY_NAMES[gs.sym] ?? `GS1 Barcode (sym=${gs.sym})`;
+    // gs1encoder accepted the data but no AI elements came back — could be a
+    // composite barcode where only separator lines remained, or an HRI shape
+    // parseHRIElements doesn't match. Either way, "non-compliant with zero
+    // diagnostics" is hostile to the auditor; explain what we observed.
+    const emptyDiagnosis: ValidationMessage[] = elements.length === 0
+      ? [{
+          severity: "error",
+          message: "gs1encoder accepted the barcode data but extracted no Application Identifier elements. The barcode may carry an unusual or unsupported HRI shape — please report the raw data so the parser can be extended.",
+        }]
+      : [];
     return makeResult(ctx, {
       gs1Confidence: "confirmed",
       isCompliant: elements.length > 0,
       symbology,
       elements,
-      errors: [],
+      errors: emptyDiagnosis,
       warnings: [],
     });
   } catch (err) {
@@ -630,18 +739,20 @@ function handleConfirmed(
       ? err.message
       : String(err);
 
-    // Some valid GS1 barcodes fail strict AI-association rules but are still
-    // structurally correct. Retry with associations disabled and downgrade the
-    // error to a warning.
+    // Strict parse failed an AI-association rule. Retry with associations off
+    // so the auditor can still see what's encoded — but keep isCompliant: false
+    // and surface the original failure as an error, not a warning. This is a
+    // compliance product; a label that fails GS1's own association rules is
+    // not compliant, regardless of whether elements can be extracted.
     const relaxed = tryRelaxedValidation(gs, normalizedScanData);
     if (relaxed) {
       return makeResult(ctx, {
         gs1Confidence: "confirmed",
-        isCompliant: true,
+        isCompliant: false,
         symbology: relaxed.symbology,
         elements: relaxed.elements,
-        errors: [],
-        warnings: [{ severity: "warning", message }],
+        errors: [{ severity: "error", message }],
+        warnings: [],
       });
     }
 
@@ -699,8 +810,16 @@ function tryRelaxedValidation(
     gs.scanData = scanData;
     elements = parseHRIElements(gs.hri);
     symbology = SYMBOLOGY_NAMES[gs.sym] ?? `GS1 Barcode (sym=${gs.sym})`;
-  } catch {
-    // Relaxed parse also failed; let the caller try the next fallback.
+  } catch (err) {
+    // Expected encoder rejections are the common case — fall through silently
+    // and let the caller try the next fallback. Anything else (TypeError,
+    // OOM, library regression) is worth surfacing in dev so it doesn't hide
+    // behind the silent fallback ladder.
+    if (import.meta.env.DEV
+        && !(err instanceof GS1encoderScanDataException)
+        && !(err instanceof GS1encoderParameterException)) {
+      console.warn("[tryRelaxedValidation] unexpected error:", err);
+    }
   } finally {
     try { gs.validateAIassociations = true; } catch { /* ignore */ }
   }
