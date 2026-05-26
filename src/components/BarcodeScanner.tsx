@@ -121,6 +121,7 @@ function computeOverlayRoi(mode: RoiMode, containerW: number, containerH: number
 
 export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const [isScanning, setIsScanning] = useState(false);
+  const [isDragActive, setIsDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [scanLog, setScanLog] = useState<Array<{ id: number; text: string }>>([]);
@@ -133,6 +134,7 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const dragDepthRef = useRef(0);
   const rafRef = useRef<number>(0);
   // Per-session counter, incremented on every start/stop/unmount. Each scan
   // loop captures its own session id at startup; an in-flight readBarcodes
@@ -160,11 +162,15 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     setTorchOn(false);
   }, []);
 
-  const handleFileImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    // Reset so the same file can be re-selected.
-    e.target.value = "";
-    if (!file) return;
+  const processImageFile = useCallback(async (file: Blob) => {
+    if (isScanning) {
+      setError("Stop camera scanning before importing or pasting an image.");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      setError("Please use a valid image file type.");
+      return;
+    }
 
     setError(null);
     setLastScan(null);
@@ -224,7 +230,53 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     } finally {
       URL.revokeObjectURL(url);
     }
-  }, [onScan]);
+  }, [isScanning, onScan]);
+
+  const handleFileImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset so the same file can be re-selected.
+    e.target.value = "";
+    if (!file) return;
+    await processImageFile(file);
+  }, [processImageFile]);
+
+  const handleDragEnter = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (isScanning) return;
+    e.preventDefault();
+    dragDepthRef.current += 1;
+    if (e.dataTransfer?.types.includes("Files")) {
+      setIsDragActive(true);
+    }
+  }, [isScanning]);
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (isScanning) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, [isScanning]);
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (isScanning) return;
+    e.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+    }
+  }, [isScanning]);
+
+  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+    if (isScanning) return;
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+
+    const file = e.dataTransfer.files?.[0];
+    if (!file) {
+      setError("No file was dropped.");
+      return;
+    }
+    await processImageFile(file);
+  }, [isScanning, processImageFile]);
 
   const toggleRoiMode = useCallback(() => {
     setRoiMode((prev) => nextMode(prev));
@@ -432,6 +484,26 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     };
   }, []);
 
+  useEffect(() => {
+    const onPaste = async (e: ClipboardEvent) => {
+      if (isScanning) return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (const item of items) {
+        if (!item.type.startsWith("image/")) continue;
+        const file = item.getAsFile();
+        if (!file) continue;
+        e.preventDefault();
+        await processImageFile(file);
+        return;
+      }
+    };
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [isScanning, processImageFile]);
+
   return (
     <div className="flex flex-col items-center gap-4 w-full">
       <div className="relative w-full overflow-hidden rounded-lg">
@@ -465,7 +537,14 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
         className="hidden"
       />
 
-      <div className="flex gap-3">
+      <div
+        className={`w-full rounded-lg border-2 border-dashed p-3 transition-colors ${!isScanning && isDragActive ? "border-blue-400 bg-blue-900/20" : "border-gray-700"}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+      <div className="flex gap-3 justify-center">
         {!isScanning ? (
           <>
             <button
@@ -511,6 +590,12 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
             </button>
           </>
         )}
+      </div>
+      {!isScanning && (
+        <p className="mt-2 text-center text-xs text-gray-500">
+          Desktop: drag and drop an image here or paste with Ctrl+V
+        </p>
+      )}
       </div>
 
       <p className="text-gray-500 text-xs text-center">
