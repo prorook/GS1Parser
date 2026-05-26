@@ -130,6 +130,7 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
   const [roiMode, setRoiMode] = useState<RoiMode>(loadStoredRoiMode);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
   const rafRef = useRef<number>(0);
@@ -158,6 +159,72 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
     setTorchSupported(false);
     setTorchOn(false);
   }, []);
+
+  const handleFileImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset so the same file can be re-selected.
+    e.target.value = "";
+    if (!file) return;
+
+    setError(null);
+    setLastScan(null);
+
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("Failed to load image"));
+      });
+
+      // Cap dimensions to avoid memory issues on low-end devices.
+      const MAX_DIM = 4096;
+      let { naturalWidth: w, naturalHeight: h } = img;
+      if (w > MAX_DIM || h > MAX_DIM) {
+        const scale = MAX_DIM / Math.max(w, h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+
+      const canvas = canvasRef.current;
+      if (!canvas) { setError("Canvas not available"); return; }
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) { setError("2D context unavailable"); return; }
+      ctx.drawImage(img, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+
+      const results = await readBarcodes(imageData, READER_OPTIONS);
+      const first = results[0];
+      if (!first || !first.isValid) {
+        setError("No barcode detected in image. Try a clearer photo or different angle.");
+        return;
+      }
+
+      const rawText = new TextDecoder("iso-8859-1").decode(first.bytes);
+      const scanResult: ScanResult = {
+        scanData: first.symbologyIdentifier + rawText,
+        symbologyIdentifier: first.symbologyIdentifier,
+        text: rawText,
+        contentType: first.contentType,
+        format: first.format,
+      };
+
+      const timestamp = new Date().toLocaleTimeString();
+      const logEntry = `[${timestamp}] ${first.format} | SI=${first.symbologyIdentifier} | CT=${first.contentType} | text=${first.text.substring(0, 50)}${first.text.length > 50 ? "..." : ""}`;
+      const entry = { id: ++scanLogIdRef.current, text: logEntry };
+      setScanLog((prev) => [entry, ...prev].slice(0, 20));
+
+      setLastScan(`${first.symbologyIdentifier}${first.text.substring(0, 60)}`);
+      onScan(scanResult);
+    } catch (err) {
+      setError(`Image error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }, [onScan]);
 
   const toggleRoiMode = useCallback(() => {
     setRoiMode((prev) => nextMode(prev));
@@ -390,15 +457,32 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
         </div>
       )}
 
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFileImport}
+        className="hidden"
+      />
+
       <div className="flex gap-3">
         {!isScanning ? (
-          <button
-            onClick={startScanning}
-            aria-label="Scan barcode"
-            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
-          >
-            <span aria-hidden="true">📷 </span>Scan Barcode
-          </button>
+          <>
+            <button
+              onClick={startScanning}
+              aria-label="Scan barcode"
+              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+            >
+              <span aria-hidden="true">📷 </span>Scan Barcode
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Import barcode image"
+              className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
+            >
+              <span aria-hidden="true">📁 </span>Import Image
+            </button>
+          </>
         ) : (
           <>
             <button
