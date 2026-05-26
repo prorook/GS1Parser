@@ -828,6 +828,8 @@ function tryRelaxedValidation(
 
 // Loop the known wrong-GS characters and try each as a substitute. Used in
 // the confirmed-error path where the scan prefix is already a GS1 AIM ID.
+// Disables AI association validation so that a missing mandatory AI (e.g.
+// AI 01 required by weight AIs) doesn't mask the wrong-separator diagnosis.
 function trySubstituteGSCharsDirect(
   gs: GS1encoder,
   symbologyIdentifier: string,
@@ -837,12 +839,15 @@ function trySubstituteGSCharsDirect(
     if (!normalizedText.includes(sub.char)) continue;
     const fixedText = normalizedText.split(sub.char).join("\x1D");
     try {
+      gs.validateAIassociations = false;
       gs.scanData = symbologyIdentifier + fixedText;
       const fixedElements = parseHRIElements(gs.hri);
       if (fixedElements.length > 1) {
         return { elements: fixedElements, subName: sub.name };
       }
-    } catch { /* this substitute didn't help */ }
+    } catch { /* this substitute didn't help */ } finally {
+      try { gs.validateAIassociations = true; } catch { /* ignore */ }
+    }
   }
   return null;
 }

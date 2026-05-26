@@ -677,4 +677,25 @@ describe("GS1 Parser (gs1encoder)", () => {
       expect(result.warnings.some((w) => w.severity === "info" && w.message.includes("coincidental"))).toBe(false);
     });
   });
+
+  describe("Wrong GS substitute on confirmed GS1-128 with AI association gaps", () => {
+    it("detects percent as wrong GS separator even when AI associations would fail", async () => {
+      // Real-world case: vendor uses % instead of FNC1/GS as group separator.
+      // The data has AI 3200 (weight) without AI 01 (GTIN) — an association
+      // violation that previously caused trySubstituteGSCharsDirect to silently
+      // fail, masking the real diagnosis.
+      const rawText = "24111700110%9200099333%112211051723110532000000501099082347G0";
+      const scan = makeScanResult({
+        scanData: "]C1" + rawText,
+        symbologyIdentifier: "]C1",
+        text: rawText,
+        contentType: "GS1",
+        format: "Code128",
+      });
+      const result = await parseGS1ScanData(scan);
+      expect(result.errors.some((e) => e.message.includes("percent sign"))).toBe(true);
+      expect(result.elements.length).toBeGreaterThan(1);
+      expect(result.elements.some((e) => e.ai === "241")).toBe(true);
+    });
+  });
 });
