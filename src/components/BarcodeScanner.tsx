@@ -4,7 +4,7 @@ import zxingReaderWasmUrl from "zxing-wasm/reader/zxing_reader.wasm?url";
 
 // Bundle the WASM with the app so we never fetch from jsDelivr at runtime.
 // Without this override, zxing-wasm's default locateFile points at the CDN.
-prepareZXingModule({ overrides: { locateFile: (path, prefix) => (path.endsWith(".wasm") ? zxingReaderWasmUrl : prefix + path) } });
+prepareZXingModule({ overrides: { locateFile: (path: string, prefix: string) => (path.endsWith(".wasm") ? zxingReaderWasmUrl : prefix + path) } });
 
 export interface ScanResult {
   /** Full scan data string: symbologyIdentifier + text (ready for gs1encoder.scanData) */
