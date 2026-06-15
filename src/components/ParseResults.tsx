@@ -7,6 +7,14 @@ interface ParseResultsProps {
 
 export function ParseResults({ result }: ParseResultsProps) {
   const { gs1Confidence, isCompliant, symbology, symbologyIdentifier, contentType, barcodeFormat, elements, errors, warnings, rawData } = result;
+  // The exact string a Zebra DataWedge device emits when "Send AIM code
+  // identifier" is enabled: the AIM symbology prefix (e.g. ]C1) followed by
+  // the raw barcode data, with real GS (ASCII 29) separators. Tolerate any
+  // "<GS>" sentinels that may have slipped through so the copied value always
+  // carries the real control characters the warehouse app expects.
+  const dataWedgeValue = symbologyIdentifier
+    ? symbologyIdentifier + rawData.replace(/<GS>/gi, "\x1D")
+    : null;
   // Initial open state mirrors the historical default (auto-open when there
   // are no parsed elements, so the user can see what failed to parse), but
   // becomes user-controlled afterwards — React would otherwise force the open
@@ -40,6 +48,11 @@ export function ParseResults({ result }: ParseResultsProps) {
             <span className="font-mono text-white">{barcodeFormat}</span>
           </div>
         </div>
+      )}
+
+      {/* Warehouse Management value (replicates Zebra DataWedge AIM-code output) */}
+      {dataWedgeValue && (
+        <DataWedgeValueCard value={dataWedgeValue} />
       )}
 
       {/* Global Errors */}
@@ -141,6 +154,73 @@ export function ParseResults({ result }: ParseResultsProps) {
           </details>
         )}
       </div>
+    </div>
+  );
+}
+
+function DataWedgeValueCard({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API can be unavailable (insecure context / denied permission).
+      // Fall back to a hidden textarea + execCommand so the button still works.
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try {
+        document.execCommand("copy");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        /* give up silently — the value is still visible to select manually */
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+  };
+
+  // Split on GS (ASCII 29) so we can render each separator as a visible badge
+  // while the copied string keeps the real control characters.
+  const segments = value.split("\x1D");
+
+  return (
+    <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-gray-400 font-semibold text-xs uppercase tracking-wide">
+          Warehouse Management Value
+        </h3>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="shrink-0 px-2.5 py-1 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+        >
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+      <p className="text-gray-500 text-xs">
+        Full scan string with AIM code prefix, as a Zebra DataWedge device would send it. Copy and paste into the warehouse app to replicate a scan.
+      </p>
+      <pre className="p-3 bg-gray-900 rounded text-xs font-mono text-cyan-300 overflow-x-auto whitespace-pre-wrap break-all">
+        {segments.map((seg, i) => (
+          <span key={i}>
+            {seg}
+            {i < segments.length - 1 && (
+              <span className="px-1 mx-0.5 rounded bg-gray-700 text-yellow-300" aria-label="group separator">
+                &lt;GS&gt;
+              </span>
+            )}
+          </span>
+        ))}
+      </pre>
     </div>
   );
 }
